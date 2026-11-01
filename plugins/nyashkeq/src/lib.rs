@@ -294,6 +294,9 @@ impl Plugin for NyashkEQ {
     }
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _c: &mut impl ProcessContext<Self>) -> ProcessStatus {
+        nyashk_common::demo::sanitize(buffer);
+        #[cfg(feature = "standalone")]
+        nyashk_common::demo::fill(buffer, 48000.0);
         let Some(core) = self.core.as_mut() else { return ProcessStatus::Normal };
         let p = &self.params;
         if p.bypass.value() {

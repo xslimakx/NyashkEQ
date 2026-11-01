@@ -84,7 +84,14 @@ fn node(ui: &mut Ui2, setter: &ParamSetter, g: Rect, id: &str, f: &FloatParam, g
     }
     let hot = resp.hovered() || resp.dragged();
     let painter = ui.painter();
-    let col = if on { WHITE } else { DIM };
+    let accent = match id {
+        "lf" => C_LF,
+        "lmf" => C_LMF,
+        "hmf" => C_HMF,
+        "hf" => C_HF,
+        _ => WHITE,
+    };
+    let col = if on { accent } else { DIM };
     painter.circle_filled(pos, if hot { 8.0 } else { 6.0 }, if on { col } else { BG });
     painter.circle_stroke(pos, if hot { 8.0 } else { 6.0 }, Stroke::new(1.5, col));
     painter.text(pos + Vec2::new(0.0, -15.0), Align2::CENTER_BOTTOM, label, mono(9.5), if hot { WHITE } else { DIM });
@@ -159,10 +166,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     })
                     .collect();
                 if spec_pts.len() > 2 {
-                    let mut poly = spec_pts.clone();
-                    poly.push(Pos2::new(g.right(), g.bottom()));
-                    poly.push(Pos2::new(g.left(), g.bottom()));
-                    clip.add(egui::Shape::Path(egui::epaint::PathShape { points: poly, closed: true, fill: Color32::from_white_alpha(22), stroke: PathStroke::NONE }));
+                    fill_under(&clip, &spec_pts, g.bottom(), Color32::from_white_alpha(22));
                     clip.add(egui::Shape::line(spec_pts, PathStroke::new(1.0, Color32::from_white_alpha(70))));
                 }
                 // response curve
@@ -175,11 +179,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         Pos2::new(fx(g, f), dy(g, if on { cf.response_db(fs, f) } else { 0.0 }))
                     })
                     .collect();
-                let mut fill = pts.clone();
-                fill.push(Pos2::new(g.right(), dy(g, 0.0)));
-                fill.push(Pos2::new(g.left(), dy(g, 0.0)));
-                // the fill polygon is not convex, so draw it as a path
-                clip.add(egui::Shape::Path(egui::epaint::PathShape { points: fill, closed: true, fill: Color32::from_white_alpha(16), stroke: PathStroke::NONE }));
+                fill_under(&clip, &pts, dy(g, 0.0), Color32::from_white_alpha(16));
                 clip.add(egui::Shape::line(pts, PathStroke::new(2.2, WHITE)));
 
                 // nodes
@@ -265,12 +265,18 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 cx += cw + gap;
                 // bands
                 let mut band = |ui: &mut Ui2, cx: &mut f32, name: &str, g: &FloatParam, f: &FloatParam, third: Option<(&FloatParam, &str, &str)>, bell: Option<&BoolParam>, tips: (&str, &str)| {
+                    let acc = match name {
+                        "LF" => C_LF,
+                        "LMF" => C_LMF,
+                        "HMF" => C_HMF,
+                        _ => C_HF,
+                    };
                     let w = if third.is_some() { cw * 3.0 } else { cw * 2.0 };
                     title(ui, *cx, w, name);
-                    knob_r(ui, setter, g, "GAIN", cell(*cx), tips.0, true, r);
-                    knob_r(ui, setter, f, "FREQ", cell(*cx + cw), tips.1, false, r);
+                    knob_ac(ui, setter, g, "GAIN", cell(*cx), tips.0, true, r, acc);
+                    knob_ac(ui, setter, f, "FREQ", cell(*cx + cw), tips.1, false, r, acc);
                     if let Some((q, lbl, tip)) = third {
-                        knob_r(ui, setter, q, lbl, cell(*cx + 2.0 * cw), tip, false, r);
+                        knob_ac(ui, setter, q, lbl, cell(*cx + 2.0 * cw), tip, false, r, acc);
                     }
                     if let Some(b) = bell {
                         let v = b.value();

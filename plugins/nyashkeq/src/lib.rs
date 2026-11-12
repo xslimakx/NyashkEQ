@@ -62,7 +62,7 @@ fn gain(name: &str) -> FloatParam {
     FloatParam::new(name, 0.0, FloatRange::Linear { min: -16.0, max: 16.0 })
         .with_step_size(0.1)
         .with_smoother(SmoothingStyle::Linear(25.0))
-        .with_value_to_string(Arc::new(|v| format!("{:+.1}", v)))
+        .with_value_to_string(Arc::new(|v| format!("{:+.1}", (v * 10.0).round() / 10.0 + 0.0)))
 }
 fn qp(name: &str, def: f32) -> FloatParam {
     FloatParam::new(name, def, FloatRange::Skewed { min: 0.3, max: 8.0, factor: FloatRange::skew_factor(-1.5) })
@@ -139,7 +139,7 @@ impl Default for EqParams {
             out: FloatParam::new("Output", 0.0, FloatRange::Linear { min: -18.0, max: 18.0 })
                 .with_step_size(0.1)
                 .with_smoother(SmoothingStyle::Linear(25.0))
-                .with_value_to_string(Arc::new(|v| format!("{:+.1}", v))),
+                .with_value_to_string(Arc::new(|v| format!("{:+.1}", (v * 10.0).round() / 10.0 + 0.0))),
             hp_on: BoolParam::new("HP On", false),
             hp_f: freq("HP Freq", 30.0, 16.0, 350.0),
             lp_on: BoolParam::new("LP On", false),

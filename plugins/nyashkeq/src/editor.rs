@@ -5,7 +5,6 @@ use nih_plug_egui::{
     egui::{self, epaint::PathStroke, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2},
 };
 use nyashk_common::eq::*;
-use nyashk_common::fft::Fft;
 use nyashk_common::ui::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,10 +20,7 @@ const D_RANGE: f32 = 18.0;
 const FFT_N: usize = 4096;
 
 struct Gui {
-    fft: Fft,
-    frame: Vec<f32>,
-    spec: Vec<f32>,
-    smooth: Vec<f32>,
+    an: nyashk_common::analyzer::Spectrum,
     out_pk: f32,
 }
 
@@ -110,17 +106,13 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
     let size_state = editor_state.clone();
     create_egui_editor(
         editor_state,
-        Gui { fft: Fft::new(FFT_N), frame: vec![0.0; FFT_N], spec: vec![-120.0; FFT_N / 2], smooth: vec![-120.0; FFT_N / 2], out_pk: -90.0 },
+        Gui { an: nyashk_common::analyzer::Spectrum::new(FFT_N), out_pk: -90.0 },
         |ctx, _| apply_theme(ctx),
         move |ctx, setter, st| {
             ctx.request_repaint_after(Duration::from_millis(33));
             let p = &*params;
             let fs = f32::from_bits(shared.fs.load(Ordering::Relaxed));
-            shared.tap.snapshot(&mut st.frame);
-            st.fft.magnitude_db(&st.frame, &mut st.spec);
-            for (s, v) in st.smooth.iter_mut().zip(st.spec.iter()) {
-                *s = if *v > *s { *s + (*v - *s) * 0.5 } else { *s + (*v - *s) * 0.12 };
-            }
+            st.an.update(&shared.tap);
             let o_db = f32::from_bits(shared.out_db.load(Ordering::Relaxed));
             st.out_pk = if o_db > st.out_pk { o_db } else { st.out_pk - 0.9 };
 
@@ -151,23 +143,15 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         painter.text(Pos2::new(fx(g, f), g.bottom() + 11.0), Align2::CENTER_CENTER, fmt_hz(f), mono(9.5), DIM);
                     }
                 }
-                // spectrum (output), tilted +4.5 dB/oct so pink noise looks flat
-                let bin_hz = fs / FFT_N as f32;
-                let spec_pts: Vec<Pos2> = (1..FFT_N / 2)
-                    .step_by(2)
-                    .filter_map(|k| {
-                        let f = k as f32 * bin_hz;
-                        if !(F_LO..=F_HI).contains(&f) {
-                            return None;
-                        }
-                        let db = st.smooth[k] + 4.5 * (f / 1000.0).log2() + 18.0;
-                        let t = ((db + 90.0) / 90.0).clamp(0.0, 1.0);
-                        Some(Pos2::new(fx(g, f), g.bottom() - g.height() * 0.8 * t))
-                    })
-                    .collect();
-                if spec_pts.len() > 2 {
-                    fill_under(&clip, &spec_pts, g.bottom(), Color32::from_white_alpha(22));
-                    clip.add(egui::Shape::line(spec_pts, PathStroke::new(1.0, Color32::from_white_alpha(70))));
+                // spectrum (output), tilted +4.5 dB/oct so pink noise looks flat; one column per
+                // pixel (loudest bin), solid fill without overlaps, grid redrawn on top
+                let spec_pts = st.an.points(fs, F_LO, F_HI.min(fs * 0.49), 260, 4.5, |f| fx(g, f), |db| g.bottom() - g.height() * 0.8 * ((db + 18.0 + 90.0) / 90.0).clamp(0.0, 1.0));
+                nyashk_common::analyzer::draw_spectrum(&clip, g, &spec_pts, Color32::from_gray(30), Color32::from_gray(85));
+                for d in [-12.0f32, -6.0, 6.0, 12.0] {
+                    clip.hline(g.left()..=g.right(), dy(g, d), Stroke::new(1.0, Color32::from_white_alpha(8)));
+                }
+                for f in [50.0f32, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] {
+                    clip.vline(fx(g, f), g.top()..=g.bottom(), Stroke::new(1.0, Color32::from_white_alpha(8)));
                 }
                 // response curve
                 let cfg = p.cfg();

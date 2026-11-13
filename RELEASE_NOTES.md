@@ -1,3 +1,8 @@
+## NyashkEQ 1.0.2
+
+- **Points stay inside the graph.** At 20 Hz, 20 kHz or full boost/cut the band points sat half on the frame, and their labels and values went outside the graph or over the hint text. Points are now kept inside, the label moves below the point when there is no room above, the value on hover goes wherever there is room (never outside), and both have a dark backing so they stay readable where the curve runs through them.
+- The "drag the points" hint moved to the header, so the points no longer run over it.
+
 ## NyashkEQ 1.0.1
 
 - **Alt-tab fix (Linux):** after alt-tab, minimising or covering the window, parts of the picture (backgrounds, knobs, images) could stay blank until something on them moved. The window is now drawn again in full whenever the system throws its contents away, and pictures are no longer lost while the window is hidden or a frame is skipped.

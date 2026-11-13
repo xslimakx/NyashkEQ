@@ -42,7 +42,9 @@ fn y_to_d(g: Rect, y: f32) -> f32 {
 fn node(ui: &mut Ui2, setter: &ParamSetter, g: Rect, id: &str, f: &FloatParam, gp: Option<&FloatParam>, q: Option<&FloatParam>, label: &str, on: bool) {
     let fv = f.value();
     let d = gp.map(|p| p.value()).unwrap_or(0.0);
-    let pos = Pos2::new(fx(g, fv), dy(g, d));
+    // drawn inside the frame: at 20 Hz / 20 kHz / +-18 dB the point used to sit half on the border
+    let inner = g.shrink(9.0);
+    let pos = Pos2::new(fx(g, fv).clamp(inner.left(), inner.right()), dy(g, d).clamp(inner.top(), inner.bottom()));
     let hit = Rect::from_center_size(pos, Vec2::splat(22.0));
     let resp = ui.interact(hit, egui::Id::new(("eqnode", id)), Sense::click_and_drag());
     if resp.drag_started() {
@@ -90,13 +92,35 @@ fn node(ui: &mut Ui2, setter: &ParamSetter, g: Rect, id: &str, f: &FloatParam, g
     let col = if on { accent } else { DIM };
     painter.circle_filled(pos, if hot { 8.0 } else { 6.0 }, if on { col } else { BG });
     painter.circle_stroke(pos, if hot { 8.0 } else { 6.0 }, Stroke::new(1.5, col));
-    painter.text(pos + Vec2::new(0.0, -15.0), Align2::CENTER_BOTTOM, label, mono(9.5), if hot { WHITE } else { DIM });
+    // label above the point (below it when there is no room), value on the other side; both kept
+    // inside the frame horizontally
+    // `off`: extra distance from the point (to stack the value under / over the label)
+    let put = |text: String, size: f32, colour: Color32, above: bool, off: f32| {
+        let gal = painter.layout_no_wrap(text, mono(size), colour);
+        let sz = gal.size();
+        let x = (pos.x - sz.x * 0.5).clamp(g.left() + 3.0, g.right() - 3.0 - sz.x);
+        let y = if above { pos.y - 11.0 - off - sz.y } else { pos.y + 11.0 + off };
+        // dark backing: readable where the curve or the spectrum runs through the text
+        painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), sz).expand2(Vec2::new(3.0, 1.0)), 2.0, Color32::from_black_alpha(170));
+        painter.galley(Pos2::new(x, y), gal, colour);
+    };
+    let room_above = pos.y - 11.0 - 12.0 >= g.top() + 2.0;
+    let room_below = pos.y + 11.0 + 13.0 <= g.bottom() - 2.0;
+    let label_above = room_above || !room_below;
+    put(label.to_string(), 9.5, if hot { WHITE } else { DIM }, label_above, 0.0);
     if hot {
         let t = match gp {
             Some(_) => format!("{} Hz  {:+.1} dB", fmt_hz(fv), d),
             None => format!("{} Hz", fmt_hz(fv)),
         };
-        painter.text(pos + Vec2::new(0.0, 15.0), Align2::CENTER_TOP, t, mono(10.0), WHITE);
+        // the value goes on the other side of the point; if that side has no room, it is stacked
+        // next to the label instead (never outside the graph)
+        let other_room = if label_above { room_below } else { room_above };
+        if other_room {
+            put(t, 10.0, WHITE, !label_above, 0.0);
+        } else {
+            put(t, 10.0, WHITE, label_above, 15.0);
+        }
     }
 }
 type Ui2 = nih_plug_egui::egui::Ui;
@@ -173,7 +197,8 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 node(ui, setter, g, "hmf", &p.hmf_f, Some(&p.hmf_g), Some(&p.hmf_q), "HMF", true);
                 node(ui, setter, g, "hf", &p.hf_f, Some(&p.hf_g), None, "HF", true);
                 node(ui, setter, g, "lp", &p.lp_f, None, None, "LP", p.lp_on.value());
-                painter.text(Pos2::new(g.left() + 8.0, g.top() + 10.0), Align2::LEFT_CENTER, "drag the points  ·  wheel on LMF / HMF = width  ·  double-click = reset gain", mono(9.5), DIM);
+                // hint in the header: inside the graph the points ran over it
+                painter.text(Pos2::new(BASE_W - 14.0 - 76.0 - 14.0, 34.0), Align2::RIGHT_CENTER, "drag the points  ·  wheel on LMF / HMF = width  ·  double-click = reset gain", mono(9.0), DIM);
 
                 // output meter on the right of the graph
                 let mr = Rect::from_min_size(Pos2::new(gp.right() - 30.0, g.top()), Vec2::new(14.0, g.height()));

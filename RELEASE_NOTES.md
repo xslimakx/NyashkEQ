@@ -1,3 +1,7 @@
+## NyashkEQ 1.0.5
+
+- ANALOG switches without a click (the signal now always takes the same oversampled path, the saturation fades in / out), and all switch fades are S-shaped over 10 ms (a large EQ boost switched in or out no longer leaves a faint corner).
+
 ## NyashkEQ 1.0.4
 
 - **Click-free switching:** Bypass, EQ IN and the high- / low-pass on-off buttons now fade over 5-10 ms, and the filters keep running underneath, so switching during playback no longer clicks (bypass used to cut over hard and the filters restarted from a stale state).

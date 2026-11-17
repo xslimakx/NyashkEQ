@@ -191,11 +191,12 @@ pub struct Core {
     pub bypass: bool,
     byp_x: f32,
     eq_x: f32,
+    an_x: f32,
 }
 
 impl Core {
     pub fn new(fs: f32) -> Self {
-        Self { st: Default::default(), os: [Os2::new(fs), Os2::new(fs)], fs, coefs: EqCoefs::new(fs, &EqCfg::default()), tick: 0, out_peak: 0.0, bypass: false, byp_x: 0.0, eq_x: 1.0 }
+        Self { st: Default::default(), os: [Os2::new(fs), Os2::new(fs)], fs, coefs: EqCoefs::new(fs, &EqCfg::default()), tick: 0, out_peak: 0.0, bypass: false, byp_x: 0.0, eq_x: 1.0, an_x: 0.0 }
     }
     pub fn reset(&mut self) {
         for s in self.st.iter_mut() {
@@ -217,7 +218,7 @@ impl Core {
         let st = &mut self.st;
         let dry = *x;
         // EQ IN fades over 5 ms; the filters run either way, so switching never clicks
-        let step = 1.0 / (0.005 * self.fs);
+        let step = 1.0 / (0.010 * self.fs);
         self.eq_x = if eq_in { (self.eq_x + step).min(1.0) } else { (self.eq_x - step).max(0.0) };
         let mut y = *x;
         if n == 2 {
@@ -236,14 +237,18 @@ impl Core {
         } else {
             y[0] = st[0].tick(&c, x[0]);
         }
+        // (an S-shaped fade: no corner where it starts or ends)
+        let w = self.eq_x * self.eq_x * (3.0 - 2.0 * self.eq_x);
         for i in 0..n {
-            x[i] += (y[i] - x[i]) * self.eq_x;
+            x[i] += (y[i] - x[i]) * w;
         }
+        // ANALOG: always the same oversampled path (no jump in phase when it is switched), the
+        // saturation itself fades in / out over 10 ms
+        self.an_x = if analog { (self.an_x + step).min(1.0) } else { (self.an_x - step).max(0.0) };
+        let aw = self.an_x * self.an_x * (3.0 - 2.0 * self.an_x);
         for i in 0..n {
             let mut v = x[i];
-            if analog {
-                v = self.os[i].process(v, |a| sat_asym(a * 0.8, 0.04) / 0.8);
-            }
+            v = self.os[i].process(v, |a| a + (sat_asym(a * 0.8, 0.04) / 0.8 - a) * aw);
             if phase {
                 v = -v;
             }
@@ -253,8 +258,9 @@ impl Core {
         let bstep = 1.0 / (0.010 * self.fs);
         self.byp_x = if self.bypass { (self.byp_x + bstep).min(1.0) } else { (self.byp_x - bstep).max(0.0) };
         if self.byp_x > 0.0 {
+            let w = self.byp_x * self.byp_x * (3.0 - 2.0 * self.byp_x);
             for i in 0..n {
-                x[i] += (dry[i] - x[i]) * self.byp_x;
+                x[i] += (dry[i] - x[i]) * w;
             }
         }
     }

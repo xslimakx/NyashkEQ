@@ -93,7 +93,7 @@ impl EqCoefs {
             hf: band(&c.hf, Some(false)),
             lp: Coef::lowpass(fs, c.lp_f, 0.7071),
             lp_on: c.lp_on,
-            ramp: 1.0 / (0.005 * fs),
+            ramp: 1.0 / (0.010 * fs),
         }
     }
 
@@ -133,13 +133,14 @@ impl EqState {
         fade(&mut self.hp_x, c.hp_on);
         fade(&mut self.lp_x, c.lp_on);
         let h = self.hp2.tick(&c.hp2, self.hp1.tick(&c.hp1, y));
-        y += (h - y) * self.hp_x;
+        let ss = |u: f32| u * u * (3.0 - 2.0 * u);
+        y += (h - y) * ss(self.hp_x);
         y = self.lf.tick(&c.lf, y);
         y = self.lmf.tick(&c.lmf, y);
         y = self.hmf.tick(&c.hmf, y);
         y = self.hf.tick(&c.hf, y);
         let l = self.lp.tick(&c.lp, y);
-        y += (l - y) * self.lp_x;
+        y += (l - y) * ss(self.lp_x);
         y
     }
     pub fn reset(&mut self) {

@@ -182,3 +182,44 @@ fn switches_do_not_click() {
         assert!(worst < slope * 1.2, "{what} clicks: {worst}");
     }
 }
+
+#[test]
+fn switches_leave_no_sharp_corners() {
+    // second difference of the output relative to the same run without switching
+    let fs = 48000.0;
+    for what in ["eq_in", "hp", "lp", "bypass", "analog"] {
+        let run = |toggle: bool| {
+            let mut c = Core::new(fs);
+            let mut cfg = EqCfg::default();
+            cfg.lf = Band { freq: 80.0, gain_db: 12.0, q: 1.0, bell: true };
+            cfg.hp_f = 120.0;
+            cfg.lp_f = 2000.0;
+            let (mut eq_in, mut analog) = (true, false);
+            let (mut y1, mut y2, mut worst) = (0.0f32, 0.0f32, 0.0f32);
+            for i in 0..(fs * 1.0) as usize {
+                if toggle && i % 12000 == 0 && i > 0 {
+                    match what {
+                        "eq_in" => eq_in = !eq_in,
+                        "hp" => cfg.hp_on = !cfg.hp_on,
+                        "lp" => cfg.lp_on = !cfg.lp_on,
+                        "analog" => analog = !analog,
+                        _ => c.bypass = !c.bypass,
+                    }
+                }
+                let t = i as f32 / fs;
+                let s = 0.05 * (2.0 * PI * 80.0 * t).sin() + 0.02 * (2.0 * PI * 700.0 * t).sin();
+                let mut x = [s, s];
+                c.frame(&cfg, eq_in, Mode::Stereo, false, analog, 1.0, &mut x, 2);
+                if i > 4800 {
+                    worst = worst.max((x[0] - 2.0 * y1 + y2).abs());
+                }
+                y2 = y1;
+                y1 = x[0];
+            }
+            worst
+        };
+        let r = run(true) / run(false);
+        println!("{what}: sharpest corner x{r:.2}");
+        assert!(r < 2.0, "{what} clicks (x{r:.1})");
+    }
+}

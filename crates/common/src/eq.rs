@@ -50,6 +50,8 @@ pub struct EqCoefs {
     pub hf: Coef,
     pub lp: Coef,
     pub lp_on: bool,
+    /// per-sample step of the 5 ms on / off fades of the high- and low-pass
+    pub ramp: f32,
 }
 
 fn eff_q(v: Voicing, q: f32, gain_db: f32) -> f32 {
@@ -91,6 +93,7 @@ impl EqCoefs {
             hf: band(&c.hf, Some(false)),
             lp: Coef::lowpass(fs, c.lp_f, 0.7071),
             lp_on: c.lp_on,
+            ramp: 1.0 / (0.005 * fs),
         }
     }
 
@@ -116,22 +119,27 @@ pub struct EqState {
     hmf: Bq,
     hf: Bq,
     lp: Bq,
+    // 0..1 fades: switching the high- / low-pass on or off is click-free (their filters keep
+    // running while off, so they never start from a stale state)
+    hp_x: f32,
+    lp_x: f32,
 }
 
 impl EqState {
     #[inline]
     pub fn tick(&mut self, c: &EqCoefs, x: f32) -> f32 {
         let mut y = x;
-        if c.hp_on {
-            y = self.hp2.tick(&c.hp2, self.hp1.tick(&c.hp1, y));
-        }
+        let fade = |v: &mut f32, on: bool| *v = if on { (*v + c.ramp).min(1.0) } else { (*v - c.ramp).max(0.0) };
+        fade(&mut self.hp_x, c.hp_on);
+        fade(&mut self.lp_x, c.lp_on);
+        let h = self.hp2.tick(&c.hp2, self.hp1.tick(&c.hp1, y));
+        y += (h - y) * self.hp_x;
         y = self.lf.tick(&c.lf, y);
         y = self.lmf.tick(&c.lmf, y);
         y = self.hmf.tick(&c.hmf, y);
         y = self.hf.tick(&c.hf, y);
-        if c.lp_on {
-            y = self.lp.tick(&c.lp, y);
-        }
+        let l = self.lp.tick(&c.lp, y);
+        y += (l - y) * self.lp_x;
         y
     }
     pub fn reset(&mut self) {

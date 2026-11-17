@@ -187,11 +187,15 @@ pub struct Core {
     coefs: EqCoefs,
     tick: u32,
     pub out_peak: f32,
+    /// plugin bypass (faded over 10 ms, the EQ keeps running underneath)
+    pub bypass: bool,
+    byp_x: f32,
+    eq_x: f32,
 }
 
 impl Core {
     pub fn new(fs: f32) -> Self {
-        Self { st: Default::default(), os: [Os2::new(fs), Os2::new(fs)], fs, coefs: EqCoefs::new(fs, &EqCfg::default()), tick: 0, out_peak: 0.0 }
+        Self { st: Default::default(), os: [Os2::new(fs), Os2::new(fs)], fs, coefs: EqCoefs::new(fs, &EqCfg::default()), tick: 0, out_peak: 0.0, bypass: false, byp_x: 0.0, eq_x: 1.0 }
     }
     pub fn reset(&mut self) {
         for s in self.st.iter_mut() {
@@ -211,23 +215,29 @@ impl Core {
         self.tick = self.tick.wrapping_add(1);
         let c = self.coefs;
         let st = &mut self.st;
-        if eq_in {
-            if n == 2 {
-                match mode {
-                    Mode::Stereo => {
-                        x[0] = st[0].tick(&c, x[0]);
-                        x[1] = st[1].tick(&c, x[1]);
-                    }
-                    Mode::Mid | Mode::Side => {
-                        let (m, s) = ((x[0] + x[1]) * 0.5, (x[0] - x[1]) * 0.5);
-                        let (m, s) = if mode == Mode::Mid { (st[0].tick(&c, m), s) } else { (m, st[1].tick(&c, s)) };
-                        x[0] = m + s;
-                        x[1] = m - s;
-                    }
+        let dry = *x;
+        // EQ IN fades over 5 ms; the filters run either way, so switching never clicks
+        let step = 1.0 / (0.005 * self.fs);
+        self.eq_x = if eq_in { (self.eq_x + step).min(1.0) } else { (self.eq_x - step).max(0.0) };
+        let mut y = *x;
+        if n == 2 {
+            match mode {
+                Mode::Stereo => {
+                    y[0] = st[0].tick(&c, x[0]);
+                    y[1] = st[1].tick(&c, x[1]);
                 }
-            } else {
-                x[0] = st[0].tick(&c, x[0]);
+                Mode::Mid | Mode::Side => {
+                    let (m, s) = ((x[0] + x[1]) * 0.5, (x[0] - x[1]) * 0.5);
+                    let (m, s) = if mode == Mode::Mid { (st[0].tick(&c, m), s) } else { (m, st[1].tick(&c, s)) };
+                    y[0] = m + s;
+                    y[1] = m - s;
+                }
             }
+        } else {
+            y[0] = st[0].tick(&c, x[0]);
+        }
+        for i in 0..n {
+            x[i] += (y[i] - x[i]) * self.eq_x;
         }
         for i in 0..n {
             let mut v = x[i];
@@ -238,6 +248,14 @@ impl Core {
                 v = -v;
             }
             x[i] = v * out_lin;
+        }
+        // plugin bypass: 10 ms fade to the untouched input
+        let bstep = 1.0 / (0.010 * self.fs);
+        self.byp_x = if self.bypass { (self.byp_x + bstep).min(1.0) } else { (self.byp_x - bstep).max(0.0) };
+        if self.byp_x > 0.0 {
+            for i in 0..n {
+                x[i] += (dry[i] - x[i]) * self.byp_x;
+            }
         }
     }
 }
@@ -299,14 +317,7 @@ impl Plugin for NyashkEQ {
         nyashk_common::demo::fill(buffer, 48000.0);
         let Some(core) = self.core.as_mut() else { return ProcessStatus::Normal };
         let p = &self.params;
-        if p.bypass.value() {
-            for frame in buffer.iter_samples() {
-                let n = frame.len().min(2);
-                let m: f32 = frame.into_iter().take(n).map(|s| *s).sum::<f32>() / n.max(1) as f32;
-                self.shared.tap.push(m);
-            }
-            return ProcessStatus::Normal;
-        }
+        core.bypass = p.bypass.value();
         let mut pk = 0.0f32;
         let mut cfg = p.cfg();
         for (k, mut frame) in buffer.iter_samples().enumerate() {

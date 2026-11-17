@@ -1,3 +1,8 @@
+## NyashkEQ 1.0.4
+
+- **Click-free switching:** Bypass, EQ IN and the high- / low-pass on-off buttons now fade over 5-10 ms, and the filters keep running underneath, so switching during playback no longer clicks (bypass used to cut over hard and the filters restarted from a stale state).
+- New behaviour tests: bell bandwidth follows Q, peak gain exact up to 12 kHz at 44.1 / 48 / 96 kHz, filter corners at -3 dB with 12 / 18 dB per octave, analog stage clean at low level and mild when hot, fast automation without zipper noise.
+
 ## NyashkEQ 1.0.3
 
 - Frequency grid labels read 1k / 2k / 10k instead of 1.00k / 2.00k / 10.00k; the level scale shows a plain 0 instead of +0.

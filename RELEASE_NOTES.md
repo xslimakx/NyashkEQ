@@ -1,3 +1,7 @@
+## NyashkEQ 1.0.3
+
+- Frequency grid labels read 1k / 2k / 10k instead of 1.00k / 2.00k / 10.00k; the level scale shows a plain 0 instead of +0.
+
 ## NyashkEQ 1.0.2
 
 - **Points stay inside the graph.** At 20 Hz, 20 kHz or full boost/cut the band points sat half on the frame, and their labels and values went outside the graph or over the hint text. Points are now kept inside, the label moves below the point when there is no room above, the value on hover goes wherever there is room (never outside), and both have a dark backing so they stay readable where the curve runs through them.

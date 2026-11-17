@@ -159,12 +159,14 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 let clip = painter.with_clip_rect(g);
                 for d in [-12.0f32, -6.0, 0.0, 6.0, 12.0] {
                     painter.hline(g.left()..=g.right(), dy(g, d), Stroke::new(1.0, if d == 0.0 { MID } else { LINE }));
-                    painter.text(Pos2::new(g.left() - 6.0, dy(g, d)), Align2::RIGHT_CENTER, format!("{:+.0}", d), mono(9.5), DIM);
+                    painter.text(Pos2::new(g.left() - 6.0, dy(g, d)), Align2::RIGHT_CENTER, if d.abs() < 0.5 { "0".to_string() } else { format!("{:+.0}", d) }, mono(9.5), DIM);
                 }
                 for f in [20.0f32, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0] {
                     painter.vline(fx(g, f), g.top()..=g.bottom(), Stroke::new(1.0, LINE));
                     if f < 15000.0 {
-                        painter.text(Pos2::new(fx(g, f), g.bottom() + 11.0), Align2::CENTER_CENTER, fmt_hz(f), mono(9.5), DIM);
+                        // grid labels short: "1k", "2k", "10k" (not "1.00k")
+                        let lab = if f >= 1000.0 { format!("{}k", (f / 1000.0) as i32) } else { format!("{}", f as i32) };
+                        painter.text(Pos2::new(fx(g, f), g.bottom() + 11.0), Align2::CENTER_CENTER, lab, mono(9.5), DIM);
                     }
                 }
                 // spectrum (output), tilted +4.5 dB/oct so pink noise looks flat; one column per

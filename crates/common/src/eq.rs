@@ -80,7 +80,8 @@ impl EqCoefs {
                         Coef::high_shelf(fs, b.freq, b.gain_db, shelf_q)
                     }
                 }
-                _ => Coef::peaking(fs, b.freq, b.gain_db, eff_q(c.voicing, b.q, b.gain_db)),
+                // (matched to the analog bell up to Nyquist: high bells are not squeezed)
+                _ => Coef::peaking_matched(fs, b.freq, b.gain_db, eff_q(c.voicing, b.q, b.gain_db)),
             }
         };
         Self {

@@ -56,6 +56,8 @@ fn high_bands_are_not_cramped_near_nyquist() {
         let g16 = gain_at(&c, 16000.0, fs);
         println!("fs {fs}: 12 kHz {g:.2} dB, 16 kHz {g16:.2} dB");
         assert!((g - 12.0).abs() < 0.5, "fs {fs}: {g}");
+        // the upper skirt keeps its analog shape (about +7.9 dB at 16 kHz) at every rate
+        assert!((g16 - 7.9).abs() < 1.0, "fs {fs}: cramped skirt {g16}");
     }
 }
 

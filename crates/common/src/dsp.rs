@@ -45,6 +45,55 @@ impl Coef {
         Self::norm(1.0 + al * a, -2.0 * c, 1.0 - al * a, 1.0 + al / a, -2.0 * c, 1.0 - al / a)
     }
 
+    /// Peaking EQ like `peaking`, but with the gain at Nyquist matched to the analog bell
+    /// (Orfanidis, "Digital parametric equalizer design with prescribed Nyquist-frequency gain",
+    /// 1997): high bells keep their analog shape instead of being squeezed towards Nyquist
+    /// ("cramping"). Same centre, gain and half-gain bandwidth as `peaking` lower down.
+    pub fn peaking_matched(fs: f32, f: f32, gain_db: f32, q: f32) -> Coef {
+        if gain_db.abs() < 0.01 {
+            return Coef::THRU;
+        }
+        let pi = std::f64::consts::PI;
+        let f = (f as f64).clamp(10.0, fs as f64 * 0.49);
+        let w0 = 2.0 * pi * f / fs as f64;
+        let dw = w0 / q.max(0.05) as f64;
+        let g0 = 1.0f64;
+        let g = 10f64.powf(gain_db as f64 / 20.0);
+        let gb = g.sqrt(); // half the gain in dB marks the bandwidth
+        let (g2, gb2, g02) = (g * g, gb * gb, g0 * g0);
+        // analog gain at Nyquist
+        let r = (gb2 - g02) / (g2 - gb2);
+        let num = g02 * (w0 * w0 - pi * pi).powi(2) + g2 * pi * pi * dw * dw * r;
+        let den = (w0 * w0 - pi * pi).powi(2) + pi * pi * dw * dw * r;
+        let g1 = (num / den).sqrt();
+        let ff = (g2 - gb2).abs();
+        let g00 = (g2 - g02).abs();
+        let f00 = (gb2 - g02).abs();
+        let g01 = (g2 - g0 * g1).abs();
+        let g11 = (g2 - g1 * g1).abs();
+        let f01 = (gb2 - g0 * g1).abs();
+        let f11 = (gb2 - g1 * g1).abs();
+        let w2 = (g11 / g00).sqrt() * (w0 / 2.0).tan().powi(2);
+        let dwt = (1.0 + (f00 / f11).sqrt() * w2) * (dw / 2.0).tan();
+        let c = f11 * dwt * dwt - 2.0 * w2 * (f01 - (f00 * f11).sqrt());
+        let d = 2.0 * w2 * (g01 - (g00 * g11).sqrt());
+        let aa = ((c + d) / ff).max(0.0).sqrt();
+        let bb = ((g2 * c + gb2 * d) / ff).max(0.0).sqrt();
+        let n0 = 1.0 + w2 + aa;
+        let co = Coef {
+            b0: ((g1 + g0 * w2 + bb) / n0) as f32,
+            b1: (-2.0 * (g1 - g0 * w2) / n0) as f32,
+            b2: ((g1 + g0 * w2 - bb) / n0) as f32,
+            a1: (-2.0 * (1.0 - w2) / n0) as f32,
+            a2: ((1.0 + w2 - aa) / n0) as f32,
+        };
+        if [co.b0, co.b1, co.b2, co.a1, co.a2].iter().all(|v| v.is_finite()) {
+            co
+        } else {
+            Self::peaking(fs, f as f32, gain_db, q)
+        }
+    }
+
     pub fn low_shelf(fs: f32, f: f32, gain_db: f32, q: f32) -> Coef {
         let f = (f as f64).clamp(10.0, fs as f64 * 0.49);
         let a = 10f64.powf(gain_db as f64 / 40.0);
@@ -290,4 +339,36 @@ pub fn sat_asym(x: f32, bias: f32) -> f32 {
     let y = sat_tanh(x + bias) - sat_tanh(bias);
     // restore unity small-signal gain
     y / (1.0 - sat_tanh(bias).powi(2)).max(0.2)
+}
+
+#[cfg(test)]
+mod matched_tests {
+    use super::*;
+    /// analog bell (RBJ prototype) magnitude in dB
+    fn analog_db(f0: f64, g_db: f64, q: f64, f: f64) -> f64 {
+        let a = 10f64.powf(g_db / 40.0);
+        let (w0, w) = (f0, f);
+        let re_n = w0 * w0 - w * w;
+        let im_n = w * w0 * a / q;
+        let im_d = w * w0 / (a * q);
+        10.0 * ((re_n * re_n + im_n * im_n) / (re_n * re_n + im_d * im_d)).log10()
+    }
+    #[test]
+    fn matched_bell_follows_the_analog_shape() {
+        let fs = 48000.0f32;
+        for (f0, g, q) in [(1000.0f32, 12.0f32, 1.0f32), (12000.0, 12.0, 1.0), (15000.0, -9.0, 2.0), (8000.0, 6.0, 0.5), (300.0, -12.0, 4.0)] {
+            let c = Coef::peaking_matched(fs, f0, g, q);
+            let mut worst = 0.0f64;
+            let mut f = 20.0f32;
+            while f < 23900.0 {
+                let d = c.response_db(fs, f) as f64 - analog_db(f0 as f64, g as f64, q as f64, f as f64);
+                worst = worst.max(d.abs());
+                f *= 1.03;
+            }
+            let at = c.response_db(fs, f0);
+            println!("f0 {f0} g {g} q {q}: at f0 {at:.2} dB, worst deviation from analog {worst:.2} dB");
+            assert!((at - g).abs() < 0.2, "gain at f0 {at}");
+            assert!(worst < 1.0, "shape {worst}");
+        }
+    }
 }

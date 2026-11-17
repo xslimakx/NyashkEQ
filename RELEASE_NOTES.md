@@ -1,3 +1,7 @@
+## NyashkEQ 1.0.6
+
+- Дзвони на високих частотах тепер мають ту саму форму, що й аналогові, аж до Найквіста: на 44.1/48 кГц високий дзвін більше не «стискається» (cramping). Наприклад, дзвін на 12 кГц +12 дБ дає на 16 кГц +8.5 дБ, і на 96 кГц теж +8.6 дБ (раніше на 44.1 кГц було +4.4 дБ).
+
 ## NyashkEQ 1.0.5
 
 - ANALOG switches without a click (the signal now always takes the same oversampled path, the saturation fades in / out), and all switch fades are S-shaped over 10 ms (a large EQ boost switched in or out no longer leaves a faint corner).

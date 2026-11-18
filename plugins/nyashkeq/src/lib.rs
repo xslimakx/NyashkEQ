@@ -216,6 +216,12 @@ impl Core {
         self.tick = self.tick.wrapping_add(1);
         let c = self.coefs;
         let st = &mut self.st;
+        // a NaN / inf from the host would stay in the filter memories for good: treat it as silence
+        for v in x.iter_mut() {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
         let dry = *x;
         // EQ IN fades over 5 ms; the filters run either way, so switching never clicks
         let step = 1.0 / (0.010 * self.fs);

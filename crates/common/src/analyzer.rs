@@ -47,17 +47,57 @@ impl Spectrum {
             let f1 = f_lo * (f_hi / f_lo).powf((i as f32 + 1.0) / npts as f32);
             let (b0, b1) = (bin(f0), bin(f1));
             let db = if b1 - b0 < 1.0 {
-                // interpolate between neighbouring bins
-                let k = b0.floor() as usize;
-                let t = b0 - k as f32;
-                self.smooth[k] * (1.0 - t) + self.smooth[(k + 1).min(self.smooth.len() - 1)] * t
+                // between bins: a smooth (cubic) curve through them, not straight segments
+                cubic_at(&self.smooth, 0.5 * (b0 + b1))
             } else {
                 (b0 as usize..=(b1 as usize).min(self.smooth.len() - 1)).map(|k| self.smooth[k]).fold(-200.0f32, f32::max)
             };
             out.push(Pos2::new(fx(f0), dy(db + tilt * (f0 / 1000.0).log2())));
         }
+        // a light [1 2 1] blur: no hard steps where several bins fall on one point
+        if out.len() > 2 {
+            let ys: Vec<f32> = out.iter().map(|q| q.y).collect();
+            for i in 1..out.len() - 1 {
+                out[i].y = (ys[i - 1] + 2.0 * ys[i] + ys[i + 1]) * 0.25;
+            }
+        }
         out
     }
+}
+
+/// Catmull-Rom value of `arr` at the fractional index `k`.
+pub fn cubic_at(arr: &[f32], k: f32) -> f32 {
+    let n = arr.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let k = k.clamp(0.0, (n - 1) as f32);
+    let i = k.floor() as isize;
+    let t = k - i as f32;
+    let at = |j: isize| arr[j.clamp(0, n as isize - 1) as usize];
+    let (p0, p1, p2, p3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+    0.5 * (2.0 * p1 + (-p0 + p2) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t * t * t)
+}
+
+/// A polyline made smooth: Catmull-Rom between the points (x must rise), `sub` steps each.
+pub fn smooth_line(pts: &[Pos2], sub: usize) -> Vec<Pos2> {
+    let n = pts.len();
+    if n < 3 || sub < 2 {
+        return pts.to_vec();
+    }
+    let at = |j: isize| pts[j.clamp(0, n as isize - 1) as usize];
+    let mut out = Vec::with_capacity(n * sub);
+    for i in 0..n as isize - 1 {
+        let (p0, p1, p2, p3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+        for k in 0..sub {
+            let t = k as f32 / sub as f32;
+            let cr = |a: f32, b: f32, c: f32, d: f32| 0.5 * (2.0 * b + (-a + c) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t + (-a + 3.0 * b - 3.0 * c + d) * t * t * t);
+            // x linear (keeps it monotonic), y curved
+            out.push(Pos2::new(p1.x + (p2.x - p1.x) * t, cr(p0.y, p1.y, p2.y, p3.y)));
+        }
+    }
+    out.push(pts[n - 1]);
+    out
 }
 
 /// Filled spectrum with an outline, clipped to `clip`.
@@ -66,7 +106,7 @@ pub fn draw_spectrum(painter: &Painter, clip: Rect, pts: &[Pos2], fill: Color32,
         return;
     }
     let p = painter.with_clip_rect(clip);
-    let pts: Vec<Pos2> = pts.iter().map(|q| Pos2::new(q.x, q.y.min(clip.bottom() + 2.0))).collect();
+    let pts: Vec<Pos2> = smooth_line(pts, 3).iter().map(|q| Pos2::new(q.x, q.y.min(clip.bottom() + 2.0))).collect();
     // one triangle strip with shared vertices (no seams between columns)
     let mut mesh = nih_plug_egui::egui::epaint::Mesh::default();
     for (i, q) in pts.iter().enumerate() {

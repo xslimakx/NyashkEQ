@@ -1,290 +1,107 @@
-//! NyashkEQ: 4-band parametric equalizer with high-pass / low-pass, live spectrum and a draggable response graph.
+//! NyashkEQ 2: 24-band dynamic equalizer with Zero Latency, Natural Phase and Linear Phase
+//! processing, ten band shapes with slopes up to 96 dB/oct and brickwall, per-band stereo / mid /
+//! side placement, external side chain, character modes, auto gain and a live analyzer.
 
 use nih_plug::prelude::*;
-use nih_plug_egui::EguiState;
-use nyashk_common::dsp::*;
-use nyashk_common::eq::*;
 use nyashk_common::tap::Tap;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
 
+pub mod conv;
 mod editor;
+pub mod engine;
+pub mod filters;
+pub mod params;
+
+use conv::NB;
+use engine::{BandIn, Engine, Settings};
+use params::EqParams;
+pub use params::{fmt_hz, parse_hz};
 
 pub struct Shared {
-    pub tap: Tap,
-    pub out_db: AtomicU32,
+    pub tap_pre: Tap,
+    pub tap_post: Tap,
+    pub tap_sc: Tap,
+    pub out_db: [AtomicU32; 2],
     pub fs: AtomicU32,
+    pub latency: AtomicU32,
+    pub dyn_db: [AtomicU32; NB],
+    pub lvl_db: [AtomicU32; NB],
+    pub thr_db: [AtomicU32; NB],
+    pub solo: AtomicI32,
+    pub dyn_blocked: AtomicBool,
+    pub has_sc: AtomicBool,
 }
 
-#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
-pub enum Mode {
-    #[name = "STEREO"]
-    Stereo,
-    #[name = "MID"]
-    Mid,
-    #[name = "SIDE"]
-    Side,
-}
-
-#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
-pub enum Voice {
-    #[name = "BLACK"]
-    Black,
-    #[name = "BROWN"]
-    Brown,
-}
-
-pub fn fmt_hz(v: f32) -> String {
-    if v >= 1000.0 {
-        format!("{:.2}k", v / 1000.0)
-    } else {
-        format!("{:.0}", v)
-    }
-}
-pub fn parse_hz(s: &str) -> Option<f32> {
-    let t = s.trim().to_lowercase().replace("hz", "");
-    let t = t.trim();
-    if let Some(k) = t.strip_suffix('k') {
-        k.trim().parse::<f32>().ok().map(|v| v * 1000.0)
-    } else {
-        t.parse().ok()
-    }
-}
-
-fn freq(name: &str, def: f32, min: f32, max: f32) -> FloatParam {
-    FloatParam::new(name, def, FloatRange::Skewed { min, max, factor: FloatRange::skew_factor(-2.0) })
-        .with_smoother(SmoothingStyle::Logarithmic(25.0))
-        .with_value_to_string(Arc::new(fmt_hz))
-        .with_string_to_value(Arc::new(parse_hz))
-}
-fn gain(name: &str) -> FloatParam {
-    FloatParam::new(name, 0.0, FloatRange::Linear { min: -16.0, max: 16.0 })
-        .with_step_size(0.1)
-        .with_smoother(SmoothingStyle::Linear(25.0))
-        .with_value_to_string(Arc::new(|v| format!("{:+.1}", (v * 10.0).round() / 10.0 + 0.0)))
-}
-fn qp(name: &str, def: f32) -> FloatParam {
-    FloatParam::new(name, def, FloatRange::Skewed { min: 0.3, max: 8.0, factor: FloatRange::skew_factor(-1.5) })
-        .with_step_size(0.01)
-        .with_smoother(SmoothingStyle::Linear(25.0))
-        .with_value_to_string(Arc::new(|v| format!("{:.2}", v)))
-}
-
-#[derive(Params)]
-pub struct EqParams {
-    #[persist = "editor-state"]
-    pub editor_state: Arc<EguiState>,
-
-    #[id = "bypass"]
-    pub bypass: BoolParam,
-    #[id = "eqin"]
-    pub eq_in: BoolParam,
-    #[id = "phase"]
-    pub phase: BoolParam,
-    #[id = "analog"]
-    pub analog: BoolParam,
-    #[id = "mode"]
-    pub mode: EnumParam<Mode>,
-    #[id = "voice"]
-    pub voice: EnumParam<Voice>,
-    #[id = "out"]
-    pub out: FloatParam,
-
-    #[id = "hpon"]
-    pub hp_on: BoolParam,
-    #[id = "hpf"]
-    pub hp_f: FloatParam,
-    #[id = "lpon"]
-    pub lp_on: BoolParam,
-    #[id = "lpf"]
-    pub lp_f: FloatParam,
-
-    #[id = "lfg"]
-    pub lf_g: FloatParam,
-    #[id = "lff"]
-    pub lf_f: FloatParam,
-    #[id = "lfb"]
-    pub lf_bell: BoolParam,
-    #[id = "lmg"]
-    pub lmf_g: FloatParam,
-    #[id = "lmf"]
-    pub lmf_f: FloatParam,
-    #[id = "lmq"]
-    pub lmf_q: FloatParam,
-    #[id = "hmg"]
-    pub hmf_g: FloatParam,
-    #[id = "hmf"]
-    pub hmf_f: FloatParam,
-    #[id = "hmq"]
-    pub hmf_q: FloatParam,
-    #[id = "hfg"]
-    pub hf_g: FloatParam,
-    #[id = "hff"]
-    pub hf_f: FloatParam,
-    #[id = "hfb"]
-    pub hf_bell: BoolParam,
-}
-
-impl Default for EqParams {
-    fn default() -> Self {
+impl Shared {
+    fn new() -> Self {
+        let z = || AtomicU32::new(0f32.to_bits());
         Self {
-            editor_state: EguiState::from_size(940, 560),
-            bypass: BoolParam::new("Bypass", false).make_bypass(),
-            eq_in: BoolParam::new("EQ In", true),
-            phase: BoolParam::new("Phase Invert", false),
-            analog: BoolParam::new("Analog", false),
-            mode: EnumParam::new("Mode", Mode::Stereo),
-            voice: EnumParam::new("Voicing", Voice::Black),
-            out: FloatParam::new("Output", 0.0, FloatRange::Linear { min: -18.0, max: 18.0 })
-                .with_step_size(0.1)
-                .with_smoother(SmoothingStyle::Linear(25.0))
-                .with_value_to_string(Arc::new(|v| format!("{:+.1}", (v * 10.0).round() / 10.0 + 0.0))),
-            hp_on: BoolParam::new("HP On", false),
-            hp_f: freq("HP Freq", 30.0, 16.0, 350.0),
-            lp_on: BoolParam::new("LP On", false),
-            lp_f: freq("LP Freq", 18000.0, 3000.0, 22000.0),
-            lf_g: gain("LF Gain"),
-            lf_f: freq("LF Freq", 100.0, 30.0, 450.0),
-            lf_bell: BoolParam::new("LF Bell", false),
-            lmf_g: gain("LMF Gain"),
-            lmf_f: freq("LMF Freq", 600.0, 200.0, 2500.0),
-            lmf_q: qp("LMF Q", 1.0),
-            hmf_g: gain("HMF Gain"),
-            hmf_f: freq("HMF Freq", 3000.0, 600.0, 7000.0),
-            hmf_q: qp("HMF Q", 1.0),
-            hf_g: gain("HF Gain"),
-            hf_f: freq("HF Freq", 10000.0, 1500.0, 16000.0),
-            hf_bell: BoolParam::new("HF Bell", false),
+            tap_pre: Tap::new(16384),
+            tap_post: Tap::new(16384),
+            tap_sc: Tap::new(16384),
+            out_db: [AtomicU32::new((-90f32).to_bits()), AtomicU32::new((-90f32).to_bits())],
+            fs: AtomicU32::new(48000f32.to_bits()),
+            latency: AtomicU32::new(0),
+            dyn_db: std::array::from_fn(|_| z()),
+            lvl_db: std::array::from_fn(|_| AtomicU32::new((-120f32).to_bits())),
+            thr_db: std::array::from_fn(|_| AtomicU32::new((-30f32).to_bits())),
+            solo: AtomicI32::new(-1),
+            dyn_blocked: AtomicBool::new(false),
+            has_sc: AtomicBool::new(false),
         }
+    }
+    pub fn get(a: &AtomicU32) -> f32 {
+        f32::from_bits(a.load(Ordering::Relaxed))
     }
 }
 
-impl EqParams {
-    /// Current (unsmoothed) settings as an EQ configuration; used by the DSP and by the GUI graph.
-    pub fn cfg(&self) -> EqCfg {
-        EqCfg {
-            hp_on: self.hp_on.value(),
-            hp_f: self.hp_f.value(),
-            lp_on: self.lp_on.value(),
-            lp_f: self.lp_f.value(),
-            lf: Band { freq: self.lf_f.value(), gain_db: self.lf_g.value(), q: 1.0, bell: self.lf_bell.value() },
-            lmf: Band { freq: self.lmf_f.value(), gain_db: self.lmf_g.value(), q: self.lmf_q.value(), bell: true },
-            hmf: Band { freq: self.hmf_f.value(), gain_db: self.hmf_g.value(), q: self.hmf_q.value(), bell: true },
-            hf: Band { freq: self.hf_f.value(), gain_db: self.hf_g.value(), q: 1.0, bell: self.hf_bell.value() },
-            voicing: match self.voice.value() {
-                Voice::Black => Voicing::Black,
-                Voice::Brown => Voicing::Brown,
-            },
-        }
+/// Settings for the engine from the parameters. `step`: samples to advance the smoothers by.
+pub fn settings(p: &EqParams, step: u32, solo: i32) -> Settings {
+    let mut s = Settings::default();
+    for (i, bp) in p.bands.iter().enumerate() {
+        let (f, g, q) = if step > 0 { (bp.freq.smoothed.next_step(step), bp.gain.smoothed.next_step(step), bp.q.smoothed.next_step(step)) } else { (bp.freq.value(), bp.gain.value(), bp.q.value()) };
+        s.bands[i] = BandIn {
+            used: bp.used.value(),
+            on: bp.on.value(),
+            spec: filters::Spec { shape: bp.shape.value(), slope: bp.slope.value(), freq: f as f64, gain_db: g as f64, q: q as f64, gq: bp.gq.value() },
+            place: bp.place.value(),
+            dyn_range: bp.dyn_range.value() as f64,
+            dyn_on: bp.dyn_on.value(),
+            thr_auto: bp.thr_auto.value(),
+            thr: bp.thr.value() as f64,
+            att: bp.attack.value() as f64 / 100.0,
+            rel: bp.release.value() as f64 / 100.0,
+            sc_free: bp.sc_free.value(),
+            sc_lo: bp.sc_lo.value() as f64,
+            sc_hi: bp.sc_hi.value() as f64,
+            sc_ext: bp.sc_ext.value(),
+        };
     }
-}
-
-pub struct Core {
-    st: [EqState; 2],
-    os: [Os2; 2],
-    fs: f32,
-    coefs: EqCoefs,
-    tick: u32,
-    pub out_peak: f32,
-    /// plugin bypass (faded over 10 ms, the EQ keeps running underneath)
-    pub bypass: bool,
-    byp_x: f32,
-    eq_x: f32,
-    an_x: f32,
-}
-
-impl Core {
-    pub fn new(fs: f32) -> Self {
-        Self { st: Default::default(), os: [Os2::new(fs), Os2::new(fs)], fs, coefs: EqCoefs::new(fs, &EqCfg::default()), tick: 0, out_peak: 0.0, bypass: false, byp_x: 0.0, eq_x: 1.0, an_x: 0.0 }
-    }
-    pub fn reset(&mut self) {
-        for s in self.st.iter_mut() {
-            s.reset();
-        }
-        for o in self.os.iter_mut() {
-            o.reset();
-        }
-    }
-
-    /// One frame. `cfg` is evaluated every 16 samples to update coefficients.
-    #[allow(clippy::too_many_arguments)]
-    pub fn frame(&mut self, cfg: &EqCfg, eq_in: bool, mode: Mode, phase: bool, analog: bool, out_lin: f32, x: &mut [f32; 2], n: usize) {
-        if self.tick % 16 == 0 {
-            self.coefs = EqCoefs::new(self.fs, cfg);
-        }
-        self.tick = self.tick.wrapping_add(1);
-        let c = self.coefs;
-        let st = &mut self.st;
-        // a NaN / inf from the host would stay in the filter memories for good: treat it as silence
-        for v in x.iter_mut() {
-            if !v.is_finite() {
-                *v = 0.0;
-            }
-        }
-        let dry = *x;
-        // EQ IN fades over 5 ms; the filters run either way, so switching never clicks
-        let step = 1.0 / (0.010 * self.fs);
-        self.eq_x = if eq_in { (self.eq_x + step).min(1.0) } else { (self.eq_x - step).max(0.0) };
-        let mut y = *x;
-        if n == 2 {
-            match mode {
-                Mode::Stereo => {
-                    y[0] = st[0].tick(&c, x[0]);
-                    y[1] = st[1].tick(&c, x[1]);
-                }
-                Mode::Mid | Mode::Side => {
-                    let (m, s) = ((x[0] + x[1]) * 0.5, (x[0] - x[1]) * 0.5);
-                    let (m, s) = if mode == Mode::Mid { (st[0].tick(&c, m), s) } else { (m, st[1].tick(&c, s)) };
-                    y[0] = m + s;
-                    y[1] = m - s;
-                }
-            }
-        } else {
-            y[0] = st[0].tick(&c, x[0]);
-        }
-        // (an S-shaped fade: no corner where it starts or ends)
-        let w = self.eq_x * self.eq_x * (3.0 - 2.0 * self.eq_x);
-        for i in 0..n {
-            x[i] += (y[i] - x[i]) * w;
-        }
-        // ANALOG: always the same oversampled path (no jump in phase when it is switched), the
-        // saturation itself fades in / out over 10 ms
-        self.an_x = if analog { (self.an_x + step).min(1.0) } else { (self.an_x - step).max(0.0) };
-        let aw = self.an_x * self.an_x * (3.0 - 2.0 * self.an_x);
-        for i in 0..n {
-            let mut v = x[i];
-            v = self.os[i].process(v, |a| a + (sat_asym(a * 0.8, 0.04) / 0.8 - a) * aw);
-            if phase {
-                v = -v;
-            }
-            x[i] = v * out_lin;
-        }
-        // plugin bypass: 10 ms fade to the untouched input
-        let bstep = 1.0 / (0.010 * self.fs);
-        self.byp_x = if self.bypass { (self.byp_x + bstep).min(1.0) } else { (self.byp_x - bstep).max(0.0) };
-        if self.byp_x > 0.0 {
-            let w = self.byp_x * self.byp_x * (3.0 - 2.0 * self.byp_x);
-            for i in 0..n {
-                x[i] += (dry[i] - x[i]) * w;
-            }
-        }
-    }
+    s.pmode = p.pmode.value();
+    s.res = p.res.value();
+    s.character = p.character.value();
+    s.auto_gain = p.auto_gain.value();
+    s.gain_scale = if step > 0 { p.gain_scale.smoothed.next_step(step) } else { p.gain_scale.value() } as f64 / 100.0;
+    s.out_db = if step > 0 { p.out.smoothed.next_step(step) } else { p.out.value() };
+    s.pan = if step > 0 { p.pan.smoothed.next_step(step) } else { p.pan.value() } / 100.0;
+    s.phase = p.phase.value();
+    s.bypass = p.bypass.value();
+    s.solo = solo;
+    s
 }
 
 pub struct NyashkEQ {
     params: Arc<EqParams>,
     shared: Arc<Shared>,
-    core: Option<Core>,
+    engine: Option<Engine>,
+    cur_latency: u32,
 }
 
 impl Default for NyashkEQ {
     fn default() -> Self {
-        Self {
-            params: Arc::new(EqParams::default()),
-            shared: Arc::new(Shared { tap: Tap::new(16384), out_db: AtomicU32::new((-90f32).to_bits()), fs: AtomicU32::new(48000f32.to_bits()) }),
-            core: None,
-        }
+        Self { params: Arc::new(EqParams::default()), shared: Arc::new(Shared::new()), engine: None, cur_latency: 0 }
     }
 }
 
@@ -296,8 +113,20 @@ impl Plugin for NyashkEQ {
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        AudioIOLayout { main_input_channels: NonZeroU32::new(2), main_output_channels: NonZeroU32::new(2), ..AudioIOLayout::const_default() },
-        AudioIOLayout { main_input_channels: NonZeroU32::new(1), main_output_channels: NonZeroU32::new(1), ..AudioIOLayout::const_default() },
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(2),
+            main_output_channels: NonZeroU32::new(2),
+            aux_input_ports: &[new_nonzero_u32(2)],
+            names: PortNames { aux_inputs: &["Sidechain"], ..PortNames::const_default() },
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(1),
+            main_output_channels: NonZeroU32::new(1),
+            aux_input_ports: &[new_nonzero_u32(1)],
+            names: PortNames { aux_inputs: &["Sidechain"], ..PortNames::const_default() },
+            ..AudioIOLayout::const_default()
+        },
     ];
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
     type SysExMessage = ();
@@ -311,61 +140,91 @@ impl Plugin for NyashkEQ {
         editor::create(self.params.clone(), self.shared.clone())
     }
 
-    fn initialize(&mut self, _l: &AudioIOLayout, config: &BufferConfig, _c: &mut impl InitContext<Self>) -> bool {
-        self.core = Some(Core::new(config.sample_rate));
+    fn initialize(&mut self, layout: &AudioIOLayout, config: &BufferConfig, context: &mut impl InitContext<Self>) -> bool {
+        let nch = layout.main_output_channels.map(|n| n.get() as usize).unwrap_or(2);
+        let mut e = Engine::new(config.sample_rate as f64, nch);
+        e.set_offline(config.process_mode == ProcessMode::Offline);
+        e.prime(&settings(&self.params, 0, -1));
+        self.cur_latency = e.latency() as u32;
+        context.set_latency_samples(self.cur_latency);
+        self.shared.latency.store(self.cur_latency, Ordering::Relaxed);
         self.shared.fs.store(config.sample_rate.to_bits(), Ordering::Relaxed);
+        self.engine = Some(e);
         true
     }
 
     fn reset(&mut self) {
-        if let Some(c) = self.core.as_mut() {
-            c.reset();
+        if let Some(e) = self.engine.as_mut() {
+            e.reset();
         }
     }
 
-    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _c: &mut impl ProcessContext<Self>) -> ProcessStatus {
+    fn process(&mut self, buffer: &mut Buffer, aux: &mut AuxiliaryBuffers, context: &mut impl ProcessContext<Self>) -> ProcessStatus {
         nyashk_common::demo::sanitize(buffer);
         #[cfg(feature = "standalone")]
         nyashk_common::demo::fill(buffer, 48000.0);
-        let Some(core) = self.core.as_mut() else { return ProcessStatus::Normal };
+        let Some(e) = self.engine.as_mut() else { return ProcessStatus::Normal };
         let p = &self.params;
-        core.bypass = p.bypass.value();
-        let mut pk = 0.0f32;
-        let mut cfg = p.cfg();
-        for (k, mut frame) in buffer.iter_samples().enumerate() {
-            // smoothed values for the filters, read every 16th frame (the coefficients are refreshed then)
-            if k % 16 == 0 {
-                cfg.hp_f = p.hp_f.smoothed.next_step(16);
-                cfg.lp_f = p.lp_f.smoothed.next_step(16);
-                cfg.lf.freq = p.lf_f.smoothed.next_step(16);
-                cfg.lf.gain_db = p.lf_g.smoothed.next_step(16);
-                cfg.lmf.freq = p.lmf_f.smoothed.next_step(16);
-                cfg.lmf.gain_db = p.lmf_g.smoothed.next_step(16);
-                cfg.lmf.q = p.lmf_q.smoothed.next_step(16);
-                cfg.hmf.freq = p.hmf_f.smoothed.next_step(16);
-                cfg.hmf.gain_db = p.hmf_g.smoothed.next_step(16);
-                cfg.hmf.q = p.hmf_q.smoothed.next_step(16);
-                cfg.hf.freq = p.hf_f.smoothed.next_step(16);
-                cfg.hf.gain_db = p.hf_g.smoothed.next_step(16);
-                cfg.hp_on = p.hp_on.value();
-                cfg.lp_on = p.lp_on.value();
-                cfg.lf.bell = p.lf_bell.value();
-                cfg.hf.bell = p.hf_bell.value();
+        let solo = self.shared.solo.load(Ordering::Relaxed);
+        let nch = buffer.channels().min(2);
+        let n = buffer.samples();
+        let sc_buf = aux.inputs.get_mut(0).map(|b| b.as_slice_immutable());
+        let sc_ch = sc_buf.as_ref().map(|b| b.len()).unwrap_or(0);
+        let mut has_sc = false;
+        let out = buffer.as_slice();
+        let mut pk = [0.0f32; 2];
+        let want_sc_tap = p.an_sc.value();
+        let mut i = 0;
+        while i < n {
+            let len = (n - i).min(16);
+            e.set(&settings(p, len as u32, solo));
+            for k in i..i + len {
+                let x = [out[0][k], if nch > 1 { out[1][k] } else { 0.0 }];
+                let sc = match &sc_buf {
+                    Some(b) if sc_ch > 0 => {
+                        let a = b[0][k];
+                        let c = if sc_ch > 1 { b[1][k] } else { a };
+                        if a != 0.0 || c != 0.0 {
+                            has_sc = true;
+                        }
+                        [a, c]
+                    }
+                    _ => [0.0, 0.0],
+                };
+                self.shared.tap_pre.push(if nch > 1 { 0.5 * (x[0] + x[1]) } else { x[0] });
+                if want_sc_tap {
+                    self.shared.tap_sc.push(0.5 * (sc[0] + sc[1]));
+                }
+                let y = e.process(x, sc);
+                out[0][k] = y[0];
+                pk[0] = pk[0].max(y[0].abs());
+                if nch > 1 {
+                    out[1][k] = y[1];
+                    pk[1] = pk[1].max(y[1].abs());
+                }
+                self.shared.tap_post.push(if nch > 1 { 0.5 * (y[0] + y[1]) } else { y[0] });
             }
-            let out_lin = db_to_lin(p.out.smoothed.next());
-            let n = frame.len().min(2);
-            let mut x = [0.0f32; 2];
-            for (i, s) in frame.iter_mut().enumerate().take(n) {
-                x[i] = *s;
-            }
-            core.frame(&cfg, p.eq_in.value(), p.mode.value(), p.phase.value(), p.analog.value(), out_lin, &mut x, n);
-            for (i, s) in frame.iter_mut().enumerate().take(n) {
-                *s = x[i];
-                pk = pk.max(x[i].abs());
-            }
-            self.shared.tap.push(if n == 2 { 0.5 * (x[0] + x[1]) } else { x[0] });
+            i += len;
         }
-        self.shared.out_db.store((20.0 * (pk + 1e-9).log10()).to_bits(), Ordering::Relaxed);
+        if nch == 1 {
+            pk[1] = pk[0];
+        }
+        for c in 0..2 {
+            self.shared.out_db[c].store((20.0 * (pk[c] + 1e-9).log10()).to_bits(), Ordering::Relaxed);
+        }
+        for b in 0..NB {
+            self.shared.dyn_db[b].store(e.dyn_out[b].to_bits(), Ordering::Relaxed);
+            self.shared.lvl_db[b].store(e.lvl_out[b].to_bits(), Ordering::Relaxed);
+            self.shared.thr_db[b].store(e.thr_out[b].to_bits(), Ordering::Relaxed);
+        }
+        self.shared.dyn_blocked.store(e.dyn_blocked, Ordering::Relaxed);
+        self.shared.has_sc.store(has_sc, Ordering::Relaxed);
+        let lat = e.latency() as u32;
+        if lat != self.cur_latency {
+            self.cur_latency = lat;
+            context.set_latency_samples(lat);
+            self.shared.latency.store(lat, Ordering::Relaxed);
+        }
         ProcessStatus::Normal
     }
 }

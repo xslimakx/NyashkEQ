@@ -280,3 +280,63 @@ fn cpu_cost() {
         eprintln!("{mode:?}: {:.1} % of real time, 12 bands (4 dynamic) {acc:.1}", t.elapsed().as_secs_f64() / 4.0 * 100.0);
     }
 }
+
+/// spectral dynamics: a loud resonance inside a wide band is pulled down, the quieter noise
+/// around it (same band) is left alone, and the latency is still where the impulse is
+#[test]
+fn spectral_band_cuts_only_the_resonance() {
+    let mut b = band(Shape::Bell, Slope::S12, 3000.0, 0.0, 0.5);
+    b.dyn_range = -12.0;
+    b.spectral = true;
+    b.density = 0.0;
+    b.thr_auto = false;
+    b.thr = -40.0;
+    let s = settings(PMode::Zero, &[b]);
+    let mut e = engine(&s, 2);
+    let lat = e.latency();
+    assert!(lat > 0);
+    let n = FS as usize * 2;
+    let mut seed = 99u32;
+    let (mut tone_in, mut tone_out, mut nz_in, mut nz_out) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    // measure with two separate passes: tone only, noise only, each through its own engine with
+    // the other present (correlate by running the same mix and subtracting is overkill here:
+    // look at the output spectrum at 3 kHz and at 2 kHz with Goertzel)
+    let mut out = vec![0.0f32; n];
+    let mut inp = vec![0.0f32; n];
+    for i in 0..n {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let nz = ((seed >> 8) as f32 / 8388608.0 - 1.0) * 0.05;
+        let x = (2.0 * PI * 3000.0 * i as f64 / FS).sin() as f32 * 0.5 + nz;
+        inp[i] = x;
+        out[i] = e.process([x, x], [0.0, 0.0])[0];
+    }
+    let goertzel = |v: &[f32], f: f64| {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (k, &x) in v.iter().enumerate() {
+            let w = 0.5 - 0.5 * (2.0 * PI * k as f64 / v.len() as f64).cos();
+            let ph = 2.0 * PI * f * k as f64 / FS;
+            re += w * x as f64 * ph.cos();
+            im += w * x as f64 * ph.sin();
+        }
+        re * re + im * im
+    };
+    let band_pow = |v: &[f32], lo: f64, hi: f64| {
+        let mut s = 0.0;
+        let mut f = lo;
+        while f < hi {
+            s += goertzel(v, f);
+            f += 37.0;
+        }
+        s
+    };
+    let a = n / 2;
+    tone_in += goertzel(&inp[a - lat..n - lat], 3000.0);
+    tone_out += goertzel(&out[a..], 3000.0);
+    nz_in += band_pow(&inp[a - lat..n - lat], 1500.0, 2500.0) + band_pow(&inp[a - lat..n - lat], 3600.0, 5000.0);
+    nz_out += band_pow(&out[a..], 1500.0, 2500.0) + band_pow(&out[a..], 3600.0, 5000.0);
+    let tone_db = 10.0 * (tone_out / tone_in).log10();
+    let nz_db = 10.0 * (nz_out / nz_in).log10();
+    eprintln!("spectral: latency {lat}, tone {tone_db:.2} dB, noise around it {nz_db:.2} dB, shown {:.1}", e.spec.show.iter().cloned().fold(0.0f32, f32::min));
+    assert!(tone_db < -8.0, "tone {tone_db}");
+    assert!(nz_db > -1.5, "noise {nz_db}");
+}

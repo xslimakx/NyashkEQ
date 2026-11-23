@@ -79,6 +79,63 @@ impl DispRange {
     }
 }
 
+macro_rules! simple_enum {
+    ($name:ident { $($v:ident = $label:literal),* $(,)? }) => {
+        #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+        pub enum $name {
+            $(#[name = $label] $v,)*
+        }
+    };
+}
+
+simple_enum!(AnRange { R60 = "60 dB", R90 = "90 dB", R120 = "120 dB" });
+simple_enum!(AnRes { Low = "Low", Medium = "Medium", High = "High", Max = "Maximum" });
+simple_enum!(AnSpeed { VSlow = "Very Slow", Slow = "Slow", Medium = "Medium", Fast = "Fast", VFast = "Very Fast" });
+simple_enum!(AnTilt { T0 = "0 dB/oct", T15 = "1.5 dB/oct", T3 = "3 dB/oct", T45 = "4.5 dB/oct", T6 = "6 dB/oct" });
+
+impl AnRange {
+    pub fn db(self) -> f32 {
+        match self {
+            AnRange::R60 => 60.0,
+            AnRange::R90 => 90.0,
+            AnRange::R120 => 120.0,
+        }
+    }
+}
+impl AnRes {
+    pub fn n(self) -> usize {
+        match self {
+            AnRes::Low => 2048,
+            AnRes::Medium => 4096,
+            AnRes::High => 8192,
+            AnRes::Max => 16384,
+        }
+    }
+}
+impl AnSpeed {
+    /// fall coefficient per GUI frame
+    pub fn fall(self) -> f32 {
+        match self {
+            AnSpeed::VSlow => 0.025,
+            AnSpeed::Slow => 0.06,
+            AnSpeed::Medium => 0.12,
+            AnSpeed::Fast => 0.25,
+            AnSpeed::VFast => 0.5,
+        }
+    }
+}
+impl AnTilt {
+    pub fn db(self) -> f32 {
+        match self {
+            AnTilt::T0 => 0.0,
+            AnTilt::T15 => 1.5,
+            AnTilt::T3 => 3.0,
+            AnTilt::T45 => 4.5,
+            AnTilt::T6 => 6.0,
+        }
+    }
+}
+
 pub fn fmt_hz(v: f32) -> String {
     if v >= 10000.0 {
         format!("{:.1}k", v / 1000.0)
@@ -156,6 +213,12 @@ pub struct BandParams {
     pub sc_hi: FloatParam,
     #[id = "scext"]
     pub sc_ext: BoolParam,
+    #[id = "spec"]
+    pub spectral: BoolParam,
+    #[id = "dens"]
+    pub density: FloatParam,
+    #[id = "sptilt"]
+    pub sp_tilt: BoolParam,
 }
 
 impl BandParams {
@@ -195,6 +258,9 @@ impl BandParams {
             sc_lo: freq(n("Side Chain Low Cut"), 20.0),
             sc_hi: freq(n("Side Chain High Cut"), 20000.0),
             sc_ext: BoolParam::new(n("External Side Chain"), false),
+            spectral: BoolParam::new(n("Spectral"), false),
+            density: FloatParam::new(n("Spectral Density"), 50.0, FloatRange::Linear { min: 0.0, max: 100.0 }).with_step_size(1.0).with_unit("%"),
+            sp_tilt: BoolParam::new(n("Spectral Tilt"), true),
         }
     }
 }
@@ -235,6 +301,22 @@ pub struct EqParams {
     pub an_post: BoolParam,
     #[id = "ansc"]
     pub an_sc: BoolParam,
+    #[id = "anrange"]
+    pub an_range: EnumParam<AnRange>,
+    #[id = "anres"]
+    pub an_res: EnumParam<AnRes>,
+    #[id = "anspeed"]
+    pub an_speed: EnumParam<AnSpeed>,
+    #[id = "antilt"]
+    pub an_tilt: EnumParam<AnTilt>,
+    #[id = "anfreeze"]
+    pub an_freeze: BoolParam,
+    #[id = "angrab"]
+    pub an_grab: BoolParam,
+    #[id = "ancoll"]
+    pub an_coll: BoolParam,
+    #[id = "piano"]
+    pub piano: BoolParam,
 }
 
 impl Default for EqParams {
@@ -273,6 +355,14 @@ impl Default for EqParams {
             an_pre: BoolParam::new("Analyzer Pre", true).non_automatable(),
             an_post: BoolParam::new("Analyzer Post", true).non_automatable(),
             an_sc: BoolParam::new("Analyzer Side Chain", false).non_automatable(),
+            an_range: EnumParam::new("Analyzer Range", AnRange::R90).non_automatable(),
+            an_res: EnumParam::new("Analyzer Resolution", AnRes::High).non_automatable(),
+            an_speed: EnumParam::new("Analyzer Speed", AnSpeed::Medium).non_automatable(),
+            an_tilt: EnumParam::new("Analyzer Tilt", AnTilt::T45).non_automatable(),
+            an_freeze: BoolParam::new("Analyzer Freeze", false).non_automatable(),
+            an_grab: BoolParam::new("Spectrum Grab", true).non_automatable(),
+            an_coll: BoolParam::new("Show Collisions", false).non_automatable(),
+            piano: BoolParam::new("Piano Display", false).non_automatable(),
         }
     }
 }

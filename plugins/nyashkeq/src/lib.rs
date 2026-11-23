@@ -13,6 +13,7 @@ mod editor;
 pub mod engine;
 pub mod filters;
 pub mod params;
+pub mod spectral;
 
 use conv::NB;
 use engine::{BandIn, Engine, Settings};
@@ -32,6 +33,10 @@ pub struct Shared {
     pub solo: AtomicI32,
     pub dyn_blocked: AtomicBool,
     pub has_sc: AtomicBool,
+    /// spectral dynamics: total gain per FFT bin (dB) and the FFT length
+    pub sp_show: Vec<AtomicU32>,
+    pub sp_n: AtomicU32,
+    pub sp_on: AtomicBool,
 }
 
 impl Shared {
@@ -50,6 +55,9 @@ impl Shared {
             solo: AtomicI32::new(-1),
             dyn_blocked: AtomicBool::new(false),
             has_sc: AtomicBool::new(false),
+            sp_show: (0..8200).map(|_| AtomicU32::new(0)).collect(),
+            sp_n: AtomicU32::new(2048),
+            sp_on: AtomicBool::new(false),
         }
     }
     pub fn get(a: &AtomicU32) -> f32 {
@@ -77,6 +85,9 @@ pub fn settings(p: &EqParams, step: u32, solo: i32) -> Settings {
             sc_lo: bp.sc_lo.value() as f64,
             sc_hi: bp.sc_hi.value() as f64,
             sc_ext: bp.sc_ext.value(),
+            spectral: bp.spectral.value(),
+            density: bp.density.value() as f64 / 100.0,
+            sp_tilt: bp.sp_tilt.value(),
         };
     }
     s.pmode = p.pmode.value();
@@ -219,6 +230,14 @@ impl Plugin for NyashkEQ {
         }
         self.shared.dyn_blocked.store(e.dyn_blocked, Ordering::Relaxed);
         self.shared.has_sc.store(has_sc, Ordering::Relaxed);
+        let sp_on = e.spectral_running();
+        self.shared.sp_on.store(sp_on, Ordering::Relaxed);
+        if sp_on {
+            self.shared.sp_n.store(e.spec.n as u32, Ordering::Relaxed);
+            for (a, v) in self.shared.sp_show.iter().zip(e.spec.show.iter()) {
+                a.store(v.to_bits(), Ordering::Relaxed);
+            }
+        }
         let lat = e.latency() as u32;
         if lat != self.cur_latency {
             self.cur_latency = lat;

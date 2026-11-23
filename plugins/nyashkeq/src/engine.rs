@@ -14,6 +14,7 @@
 use crate::conv::{BandReq, Conv, Designer, Kind, Place, Req, Worker, NB};
 use crate::filters::{analog, Cascade, CascadeState, Shape, Slope, Spec};
 use crate::params::{Character, PMode, Res};
+use crate::spectral::{SpBand, Spectral};
 use nyashk_common::dsp::{sat_asym, Bq, Coef, Os2};
 
 #[derive(Clone, Copy, Debug)]
@@ -33,6 +34,11 @@ pub struct BandIn {
     pub sc_lo: f64,
     pub sc_hi: f64,
     pub sc_ext: bool,
+    /// spectral dynamics (per FFT bin instead of the whole band)
+    pub spectral: bool,
+    /// 0..1
+    pub density: f64,
+    pub sp_tilt: bool,
 }
 
 impl Default for BandIn {
@@ -52,6 +58,9 @@ impl Default for BandIn {
             sc_lo: 20.0,
             sc_hi: 20000.0,
             sc_ext: false,
+            spectral: false,
+            density: 0.5,
+            sp_tilt: true,
         }
     }
 }
@@ -304,6 +313,8 @@ pub struct Engine {
     pub thr_out: [f32; NB],
     /// dynamics are off because of the linear-phase resolution
     pub dyn_blocked: bool,
+    pub spec: Spectral,
+    spec_run: bool,
 }
 
 impl Engine {
@@ -355,6 +366,8 @@ impl Engine {
             lvl_out: [-120.0; NB],
             thr_out: [-30.0; NB],
             dyn_blocked: false,
+            spec: Spectral::new(fs),
+            spec_run: false,
         }
     }
 
@@ -368,16 +381,27 @@ impl Engine {
         }
     }
 
+    pub fn spectral_running(&self) -> bool {
+        self.spec_run
+    }
+
     pub fn latency(&self) -> usize {
         self.latency
     }
 
-    fn latency_for(&self, m: PMode, r: Res) -> usize {
-        match m {
+    fn latency_for(&self, m: PMode, r: Res, spectral: bool) -> usize {
+        let base = match m {
             PMode::Zero => 0,
             PMode::Natural => self.nat_n / 2 + self.nat.p(),
             PMode::Linear => r.n48() * self.sc / 2 + self.lin.p(),
-        }
+        };
+        base + if spectral { self.spec.latency() } else { 0 }
+    }
+
+    /// does any band want spectral processing with these settings
+    fn spec_wanted(s: &Settings) -> bool {
+        let ok = s.pmode != PMode::Linear || s.res.dynamics_ok();
+        ok && s.bands.iter().any(|b| b.used && b.on && b.dyn_on && b.dynamic() && b.spectral)
     }
 
     pub fn reset(&mut self) {
@@ -388,6 +412,7 @@ impl Engine {
         }
         self.nat.reset();
         self.lin.reset();
+        self.spec.reset();
         for d in self.dly.iter_mut() {
             d.iter_mut().for_each(|v| *v = 0.0);
         }
@@ -402,7 +427,8 @@ impl Engine {
         self.cur = *s;
         self.run_mode = s.pmode;
         self.run_res = s.res;
-        self.latency = self.latency_for(s.pmode, s.res);
+        self.spec_run = Self::spec_wanted(s);
+        self.latency = self.latency_for(s.pmode, s.res, self.spec_run);
         self.kern_dirty = true;
         // the FIR modes fade in once their first kernel is there
         self.mode_x = if s.pmode == PMode::Zero { 1.0 } else { 0.0 };
@@ -412,7 +438,7 @@ impl Engine {
     /// new settings (call at least every block; cheap when nothing changed)
     pub fn set(&mut self, s: &Settings) {
         self.cur = *s;
-        if (s.pmode != self.run_mode || (s.pmode == PMode::Linear && s.res != self.run_res)) && !self.switching {
+        if (s.pmode != self.run_mode || (s.pmode == PMode::Linear && s.res != self.run_res) || Self::spec_wanted(s) != self.spec_run) && !self.switching {
             self.switching = true;
         }
     }
@@ -448,7 +474,8 @@ impl Engine {
             let want = bi.used && bi.on;
             let b = &mut self.bands[i];
             // dynamics
-            let dynamic = bi.dynamic() && bi.dyn_on && want && dyn_ok;
+            let dynamic = bi.dynamic() && bi.dyn_on && want && dyn_ok && !bi.spectral;
+            let sp_active = bi.dynamic() && bi.dyn_on && want && dyn_ok && bi.spectral && self.spec_run;
             if bi.used && bi.dynamic() {
                 b.det.configure(fs as f32, &bi);
                 let lvl = b.det.level_db();
@@ -482,6 +509,16 @@ impl Engine {
                 self.lvl_out[i] = -120.0;
             }
             self.dyn_out[i] = b.dyn_db as f32;
+            if bi.used && bi.dynamic() && bi.spectral {
+                let fq = bi.spec.freq.max(10.0);
+                let a0 = (4000.0 / fq).clamp(5.0, 60.0) * 10f64.powf((bi.att - 0.5) * 2.0);
+                let r0 = (a0 * 6.0).clamp(40.0, 400.0) * 10f64.powf((bi.rel - 0.5) * 2.0);
+                let mut sv = sp;
+                sv.slope = sp.slope;
+                self.spec.bands[i] = Some(SpBand { active: sp_active, spec: sv, place: bi.place, range, thr_auto: bi.thr_auto, thr: bi.thr, density: bi.density, tilt: bi.sp_tilt, att: self.spec.coef(a0), rel: self.spec.coef(r0) });
+            } else {
+                self.spec.bands[i] = None;
+            }
             let mut eff = sp;
             if eff.shape.has_gain() {
                 eff.gain_db = (sp.gain_db + b.dyn_db).clamp(-30.0, 30.0);
@@ -669,7 +706,9 @@ impl Engine {
                 self.switching = false;
                 self.run_mode = self.cur.pmode;
                 self.run_res = self.cur.res;
-                self.latency = self.latency_for(self.run_mode, self.run_res);
+                self.spec_run = Self::spec_wanted(&self.cur);
+                self.spec.reset();
+                self.latency = self.latency_for(self.run_mode, self.run_res, self.spec_run);
                 self.nat.reset();
                 self.lin.reset();
                 if let Some(k) = self.nat.cur.take() {
@@ -750,6 +789,9 @@ impl Engine {
         };
         if nch == 1 {
             y[1] = 0.0;
+        }
+        if self.spec_run {
+            y = self.spec.tick(y, nch);
         }
         let mx = ss(self.mode_x);
         y[0] *= mx;

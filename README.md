@@ -37,3 +37,7 @@ The bundle appears in `target/bundled/`.
 
 ## License
 MIT
+
+## Credits
+
+The GUI uses the Inter typeface by Rasmus Andersson (SIL Open Font License 1.1, see `plugins/nyashkeq/assets/Inter-LICENSE.txt`).

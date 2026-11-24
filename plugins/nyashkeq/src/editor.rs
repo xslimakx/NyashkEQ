@@ -35,9 +35,50 @@ fn fit_f(j: usize) -> f32 {
     20.0 * 2f32.powf(j as f32 / 12.0)
 }
 
+/// band colours (our own palette, 12 hues, then repeated a little lighter)
 fn band_col(i: usize) -> Color32 {
-    let h = (0.02 + i as f32 * 0.161) % 1.0;
-    Color32::from(egui::ecolor::Hsva::new(h, 0.55, 0.92, 1.0))
+    const P: [(u8, u8, u8); 12] = [
+        (255, 122, 122),
+        (255, 176, 92),
+        (246, 222, 102),
+        (150, 226, 120),
+        (92, 214, 170),
+        (88, 200, 236),
+        (110, 150, 255),
+        (168, 128, 255),
+        (226, 116, 236),
+        (255, 116, 180),
+        (200, 200, 210),
+        (140, 236, 220),
+    ];
+    let (r, g, b) = P[i % 12];
+    if i < 12 {
+        Color32::from_rgb(r, g, b)
+    } else {
+        Color32::from_rgb(r / 2 + 110, g / 2 + 110, b / 2 + 110)
+    }
+}
+
+/// vertical gradient rectangle
+fn grad(painter: &egui::Painter, r: Rect, top: Color32, bottom: Color32) {
+    let mut m = egui::Mesh::default();
+    m.colored_vertex(r.left_top(), top);
+    m.colored_vertex(r.right_top(), top);
+    m.colored_vertex(r.right_bottom(), bottom);
+    m.colored_vertex(r.left_bottom(), bottom);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(m));
+}
+
+/// glassy panel: soft gradient, thin border, a light line along the top
+fn glass(painter: &egui::Painter, r: Rect, accent: Option<Color32>) {
+    let rr = CornerRadius::same(10);
+    painter.rect_filled(r, rr, Color32::from_rgba_unmultiplied(20, 22, 28, 238));
+    grad(painter, r.shrink2(Vec2::new(6.0, 2.0)).with_max_y(r.top() + r.height() * 0.5), Color32::from_white_alpha(10), Color32::from_white_alpha(0));
+    painter.hline(r.left() + 10.0..=r.right() - 10.0, r.top() + 1.0, Stroke::new(1.0_f32, Color32::from_white_alpha(24)));
+    let bc = accent.map(|c| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 110)).unwrap_or(Color32::from_rgb(44, 47, 56));
+    painter.rect_stroke(r, rr, Stroke::new(1.0_f32, bc), StrokeKind::Inside);
 }
 
 const NOTES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -797,8 +838,9 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 let rng = [3.0f32, 6.0, 12.0, 30.0].into_iter().find(|&r| r >= set_rng && r >= peak * 0.92).unwrap_or(30.0);
                 let d = Disp { g: gr, range: rng, an_range: p.an_range.value().db() };
                 let painter = ui.painter().clone();
-                painter.rect_filled(gr, CornerRadius::same(6), Color32::from_rgb(9, 10, 12));
+                painter.rect_filled(gr, CornerRadius::same(8), Color32::from_rgb(8, 9, 12));
                 let clip = painter.with_clip_rect(gr.shrink(1.0));
+                grad(&clip, gr, Color32::from_rgb(22, 25, 33), Color32::from_rgb(7, 8, 11));
                 let piano = p.piano.value();
                 for f in [20.0f32, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 800.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 8000.0, 10000.0, 20000.0] {
                     let major = matches!(f as i32, 20 | 50 | 100 | 200 | 500 | 1000 | 2000 | 5000 | 10000 | 20000);
@@ -926,6 +968,10 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 let main = line_of(&tot_a);
                 if !split {
                     fill_under(&clip, &main, zero, Color32::from_white_alpha(9));
+                }
+                if !byp && !soloing {
+                    clip.add(egui::Shape::line(main.clone(), PathStroke::new(9.0_f32, Color32::from_white_alpha(10))));
+                    clip.add(egui::Shape::line(main.clone(), PathStroke::new(4.5_f32, Color32::from_white_alpha(28))));
                 }
                 clip.add(egui::Shape::line(main.clone(), PathStroke::new(2.2_f32, curve_col)));
 
@@ -1119,7 +1165,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 }
                 // wheel: over a dot (or anywhere over the display for the selected bands)
                 let wheel = ui.input(|i| i.smooth_scroll_delta.y);
-                if wheel != 0.0 && pointer.is_some_and(|pp| gr.contains(pp) && !in_overlay(pp)) {
+                if wheel != 0.0 && pointer.is_some_and(|pp| gr.contains(pp) && !in_overlay(pp) && !st.pbox.is_some_and(|(k, _)| pbox_rect(k).contains(pp))) {
                     let targets: Vec<usize> = if let Some(h) = st.hover { vec![h] } else { (0..NB).filter(|&k| st.sel[k] && views[k].used).collect() };
                     let fine = if mods.shift { 0.2 } else { 1.0 };
                     for k in targets {
@@ -1359,14 +1405,19 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let dim = soloing && solo_now as usize != i;
                     let hot = st.hover == Some(i);
                     let selected = st.sel[i];
-                    let rad = if hot || selected { 7.5 } else { 6.0 };
+                    let rad = if hot || selected { 8.0 } else { 6.5 };
                     if bv.dynamic && bv.on && !bv.spectral {
                         let ny = d.dy((bv.spec.gain_db as f32 + bv.dyn_now).clamp(-rng, rng));
                         painter.line_segment([pos, Pos2::new(pos.x, ny)], Stroke::new(3.0_f32, C_DYN));
                     }
                     let fill = if !bv.on || dim { Color32::from_rgb(24, 24, 26) } else { col };
+                    if (hot || selected) && bv.on {
+                        painter.circle_filled(pos, rad + 7.0, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 26));
+                    }
+                    painter.circle_filled(pos, rad + 1.5, Color32::from_black_alpha(160));
                     painter.circle_filled(pos, rad, fill);
-                    painter.circle_stroke(pos, rad, Stroke::new(if selected { 2.0_f32 } else { 1.2 }, if selected { WHITE } else { col }));
+                    painter.circle_filled(pos - Vec2::new(rad * 0.3, rad * 0.35), rad * 0.35, Color32::from_white_alpha(if bv.on { 70 } else { 15 }));
+                    painter.circle_stroke(pos, rad + 1.5, Stroke::new(if selected { 2.0_f32 } else { 1.0 }, if selected { WHITE } else { Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 200) }));
                     if bv.dynamic {
                         painter.circle_stroke(pos, rad + 3.0, Stroke::new(1.0_f32, C_DYN));
                     }
@@ -1427,6 +1478,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 }
 
                 // ---------------- value entry (double-click a dot)
+                let just_opened = open_edit.is_some() || st.edit.as_ref().is_some_and(|e| e.first);
                 if let Some(i) = open_edit {
                     let b = &p.bands[i];
                     st.edit = Some(Edit { band: i, text: [fmt_hz(b.freq.value()), format!("{:.1}", b.gain.value()), format!("{:.2}", b.q.value())], first: true });
@@ -1439,14 +1491,13 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         let br = pbox_rect(i);
                         let er = Rect::from_min_size(br.min, Vec2::new(196.0, 56.0));
                         let _ = ui.interact(er, egui::Id::new("edit_bg"), Sense::click());
-                        painter.rect_filled(er, CornerRadius::same(6), Color32::from_rgb(20, 21, 25));
-                        painter.rect_stroke(er, CornerRadius::same(6), Stroke::new(1.0_f32, band_col(i)), StrokeKind::Inside);
+                        glass(&painter, er, Some(band_col(i)));
                         let labels = ["FREQ", "GAIN", "Q"];
                         let mut commit = false;
                         for k in 0..3 {
                             let x = er.left() + 6.0 + k as f32 * 63.0;
                             painter.text(Pos2::new(x + 29.0, er.top() + 10.0), Align2::CENTER_CENTER, labels[k], mono(8.5), DIM);
-                            let te = egui::TextEdit::singleline(&mut ed.text[k]).font(mono(11.0)).desired_width(56.0).horizontal_align(egui::Align::Center);
+                            let te = egui::TextEdit::singleline(&mut ed.text[k]).id(egui::Id::new(("eq_edit", k))).font(mono(11.0)).desired_width(56.0).horizontal_align(egui::Align::Center);
                             let r = ui.put(Rect::from_min_size(Pos2::new(x, er.top() + 20.0), Vec2::new(58.0, 26.0)), te);
                             if ed.first && k == 0 {
                                 r.request_focus();
@@ -1468,7 +1519,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                                 set_f(setter, &b.q, q.clamp(0.025, 40.0));
                             }
                             st.edit = None;
-                        } else if ui.input(|i| i.key_pressed(Key::Escape)) || (ui.input(|i| i.pointer.any_pressed()) && pointer.is_some_and(|pp| !er.contains(pp))) {
+                        } else if ui.input(|i| i.key_pressed(Key::Escape)) || (!just_opened && ui.input(|i| i.pointer.any_pressed()) && pointer.is_some_and(|pp| !er.contains(pp))) {
                             st.edit = None;
                         }
                     }
@@ -1612,8 +1663,7 @@ fn param_display(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, s
     let bv = views[i];
     let col = band_col(i);
     let _ = ui.interact(br, egui::Id::new("pbox_bg"), Sense::click_and_drag());
-    painter.rect_filled(br, CornerRadius::same(6), Color32::from_rgba_unmultiplied(18, 19, 23, 242));
-    painter.rect_stroke(br, CornerRadius::same(6), Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 150)), StrokeKind::Inside);
+    glass(painter, br, Some(col));
     let bt = |k: f32| Rect::from_min_size(Pos2::new(br.left() + 5.0 + k * 25.0, br.top() + 4.0), Vec2::new(22.0, 19.0));
     // bypass
     let on = b.on.value();
@@ -1759,8 +1809,7 @@ fn band_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
     let col = band_col(i);
     let has_gain = bv.spec.shape.has_gain();
     let _ = ui.interact(pr, egui::Id::new("band_panel_bg"), Sense::click_and_drag());
-    painter.rect_filled(pr, CornerRadius::same(10), Color32::from_rgba_unmultiplied(15, 16, 19, 228));
-    painter.rect_stroke(pr, CornerRadius::same(10), Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 120)), StrokeKind::Inside);
+    glass(painter, pr, Some(col));
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(Pos2::new(pr.left() + x, pr.top() + y), Vec2::new(w, h));
     // top left: bypass, top right: delete
     let on = b.on.value();
@@ -1918,8 +1967,7 @@ fn band_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
 /// analyzer settings (opens on hover over the button, stays when clicked)
 fn analyzer_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, st: &mut Gui, ar: Rect, painter: &egui::Painter, _fs: f32) {
     let _ = ui.interact(ar, egui::Id::new("ana_pop_bg"), Sense::click_and_drag());
-    painter.rect_filled(ar, CornerRadius::same(8), Color32::from_rgba_unmultiplied(16, 17, 20, 248));
-    painter.rect_stroke(ar, CornerRadius::same(8), Stroke::new(1.0_f32, LINE), StrokeKind::Inside);
+    glass(painter, ar, None);
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(Pos2::new(ar.left() + x, ar.top() + y), Vec2::new(w, h));
     let lab = |x: f32, y: f32, t: &str| painter.text(Pos2::new(ar.left() + x, ar.top() + y), Align2::LEFT_CENTER, t, mono(9.0), DIM);
     lab(12.0, 12.0, "SHOW");
@@ -2011,7 +2059,7 @@ fn analyzer_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, st: &mut Gui,
 fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: &mut Gui, o: Pos2, painter: &egui::Painter, fs: f32, ana_btn: Rect) {
     let rect = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(Pos2::new(o.x + x, o.y + y), Vec2::new(w, h));
     let by = BAR_Y;
-    panel(ui, rect(14.0, by, BASE_W - 28.0, 66.0));
+    glass(painter, rect(14.0, by, BASE_W - 28.0, 66.0), None);
     let blab = |x: f32, t: &str| painter.text(Pos2::new(o.x + x, o.y + by + 12.0), Align2::LEFT_CENTER, t, mono(8.5), DIM);
     let piano = p.piano.value();
     blab(28.0, "EDIT");

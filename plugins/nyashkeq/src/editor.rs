@@ -428,6 +428,21 @@ fn shape_icon(painter: &egui::Painter, r: Rect, s: Shape, col: Color32) {
     }
 }
 
+/// headphones symbol
+fn headphones(painter: &egui::Painter, c: Pos2, col: Color32) {
+    let arc: Vec<Pos2> = (0..=16)
+        .map(|k| {
+            let a = std::f32::consts::PI + std::f32::consts::PI * k as f32 / 16.0;
+            c + Vec2::new(a.cos() * 5.5, a.sin() * 5.5 + 1.0)
+        })
+        .collect();
+    painter.add(egui::Shape::line(arc, PathStroke::new(1.4_f32, col)));
+    for sx in [-1.0f32, 1.0] {
+        let r = Rect::from_center_size(c + Vec2::new(sx * 5.0, 3.5), Vec2::new(3.0, 5.0));
+        painter.rect_filled(r, CornerRadius::same(1), col);
+    }
+}
+
 /// small text button
 fn tbtn(ui: &mut Ui, r: Rect, text: &str, on: bool, tip: &str) -> egui::Response {
     let resp = ui.allocate_rect(r, Sense::click()).on_hover_text(tip);
@@ -1229,7 +1244,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     painter.rect_stroke(rr, CornerRadius::same(2), Stroke::new(1.0_f32, Color32::BLACK), StrokeKind::Inside);
                 }
 
-                // mini toolbar over the hovered dot (like Pro-Q): power, shape, dynamics, solo, delete
+                // mini toolbar over the hovered dot (like Pro-Q): power, solo, shape, dynamics, delete
                 if let Some(i) = st.hover.filter(|_| st.drag.is_none()) {
                     st.hbar = Some((i, now));
                 }
@@ -1277,7 +1292,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                             painter.add(egui::Shape::line(arc, PathStroke::new(1.4_f32, pc)));
                             painter.line_segment([c0 - Vec2::new(0.0, 7.0), c0 - Vec2::new(0.0, 2.0)], Stroke::new(1.4_f32, pc));
                             // shape (pop-up list)
-                            let r1 = br(1.0);
+                            let r1 = br(2.0);
                             let sresp = tbtn(ui, r1, "", false, "Shape");
                             shape_icon(&painter, r1.shrink2(Vec2::new(3.0, 4.0)), bv.spec.shape, col);
                             let sid = ui.make_persistent_id(("hbar_shape", i));
@@ -1296,7 +1311,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                                 st.hbar = Some((i, now));
                             }
                             // dynamics
-                            let r2 = br(2.0);
+                            let r2 = br(3.0);
                             if bv.spec.shape.has_gain() {
                                 if tbtn(ui, r2, "D", bv.dynamic, "Make the band dynamic / static").clicked() {
                                     set_f(setter, &b.dyn_range, if bv.dynamic { 0.0 } else if b.gain.value() > 0.0 { 6.0 } else { -6.0 });
@@ -1305,8 +1320,10 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                                 painter.text(r2.center(), Align2::CENTER_CENTER, "·", mono(10.0), DIM);
                             }
                             // solo (hold)
-                            let r3 = br(3.0);
-                            let solo = tbtn(ui, r3, "S", sh.solo.load(Ordering::Relaxed) == i as i32, "Hold to hear only this band's range");
+                            let r3 = br(1.0);
+                            let solo_on = sh.solo.load(Ordering::Relaxed) == i as i32;
+                            let solo = tbtn(ui, r3, "", solo_on, "Solo: hold to hear only this band's range");
+                            headphones(&painter, r3.center(), if solo_on { Color32::BLACK } else { WHITE });
                             let cur = sh.solo.load(Ordering::Relaxed);
                             if solo.is_pointer_button_down_on() {
                                 sh.solo.store(i as i32, Ordering::Relaxed);
@@ -1410,7 +1427,10 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                             set_b(setter, &b.gq, !gq);
                         }
                     }
-                    let ear = tbtn(ui, at(534.0, 72.0, 56.0, 24.0), "SOLO", sh.solo.load(Ordering::Relaxed) == i as i32, "Hold to hear only the part of the spectrum this band works on.");
+                    let solo_on = sh.solo.load(Ordering::Relaxed) == i as i32;
+                    let er = at(534.0, 72.0, 56.0, 24.0);
+                    let ear = tbtn(ui, er, "   SOLO", solo_on, "Hold to hear only the part of the spectrum this band works on.");
+                    headphones(&painter, Pos2::new(er.left() + 11.0, er.center().y), if solo_on { Color32::BLACK } else { WHITE });
                     let holding = ear.is_pointer_button_down_on();
                     let cur_solo = sh.solo.load(Ordering::Relaxed);
                     let mouse_down = ui.input(|inp| inp.pointer.primary_down());

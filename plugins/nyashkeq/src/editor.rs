@@ -22,7 +22,10 @@ use crate::params::{fmt_hz, AnRange, AnRes, AnSpeed, AnTilt, BandParams, Charact
 use crate::Shared;
 
 pub const BASE_W: f32 = 1100.0;
-pub const BASE_H: f32 = 700.0;
+pub const BASE_H: f32 = 728.0;
+/// top of the band strip and of the bottom bar
+const STRIP_Y: f32 = 492.0;
+const BAR_Y: f32 = 650.0;
 const F_LO: f32 = 10.0;
 const F_HI: f32 = 30000.0;
 const NPTS: usize = 360;
@@ -168,6 +171,8 @@ struct Gui {
     drag: Option<Drag>,
     rubber: Option<Pos2>,
     dyn_open: bool,
+    /// mini toolbar of the dot under the mouse: (band, last time the mouse was on it)
+    hbar: Option<(usize, f64)>,
     pop: Pop,
     sketch_on: bool,
     sketch: Vec<Pos2>,
@@ -508,6 +513,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
             drag: None,
             rubber: None,
             dyn_open: false,
+            hbar: None,
             pop: Pop::None,
             sketch_on: false,
             sketch: Vec::new(),
@@ -615,7 +621,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 }
 
                 // ---------------- display
-                let gr = rect(14.0, 66.0, BASE_W - 28.0, 548.0);
+                let gr = rect(14.0, 66.0, BASE_W - 28.0, STRIP_Y - 6.0 - 66.0);
                 let d = Disp { g: gr, range: p.disp.value().db(), an_range: p.an_range.value().db() };
                 let rng = d.range;
                 let painter = ui.painter().clone();
@@ -815,9 +821,10 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let has_gain = views[i].spec.shape.has_gain();
                     let w = if st.dyn_open && has_gain { 968.0 } else { 600.0 };
                     let h = 150.0;
-                    Rect::from_min_size(Pos2::new(gr.center().x - w * 0.5, gr.bottom() - h - 36.0), Vec2::new(w, h))
+                    // its own strip under the display: never covers the curve
+                    Rect::from_min_size(Pos2::new(o.x + BASE_W * 0.5 - w * 0.5, o.y + STRIP_Y + 1.0), Vec2::new(w, h))
                 });
-                let ana_rect = if st.pop == Pop::Analyzer { Some(rect(300.0, 622.0 - 214.0, 440.0, 206.0)) } else { None };
+                let ana_rect = if st.pop == Pop::Analyzer { Some(rect(300.0, BAR_Y - 214.0, 440.0, 206.0)) } else { None };
 
                 // ---------------- interaction
                 let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -1208,7 +1215,8 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         let gal = painter.layout_no_wrap(txt, mono(10.0), WHITE);
                         let sz = gal.size();
                         let x = (pos.x - sz.x * 0.5).clamp(gr.left() + 4.0, gr.right() - 4.0 - sz.x);
-                        let y = if pos.y - 30.0 > gr.top() { pos.y - 16.0 - sz.y } else { pos.y + 14.0 };
+                        // under the dot (the button bar sits above it); above when there is no room
+                        let y = if pos.y + 16.0 + sz.y < gr.bottom() - 20.0 { pos.y + 14.0 } else { pos.y - 46.0 - sz.y };
                         painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), sz).expand2(Vec2::new(4.0, 2.0)), 3.0, Color32::from_black_alpha(210));
                         painter.galley(Pos2::new(x, y), gal, WHITE);
                     }
@@ -1219,6 +1227,103 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let rr = Rect::from_center_size(Pos2::new(node_pos(*i).x, y), Vec2::new(18.0, 6.0));
                     painter.rect_filled(rr, CornerRadius::same(2), C_DYN);
                     painter.rect_stroke(rr, CornerRadius::same(2), Stroke::new(1.0_f32, Color32::BLACK), StrokeKind::Inside);
+                }
+
+                // mini toolbar over the hovered dot (like Pro-Q): power, shape, dynamics, solo, delete
+                if let Some(i) = st.hover.filter(|_| st.drag.is_none()) {
+                    st.hbar = Some((i, now));
+                }
+                if let Some((i, t)) = st.hbar {
+                    if !views[i].used || st.drag.is_some() {
+                        st.hbar = None;
+                    } else {
+                        let np = node_pos(i);
+                        let (bw, bh, gap) = (22.0, 20.0, 3.0);
+                        let n_btn = 5.0;
+                        let w = n_btn * bw + (n_btn - 1.0) * gap + 8.0;
+                        let above = np.y - 24.0 - bh - 8.0 > gr.top();
+                        let y = if above { np.y - 22.0 - bh - 8.0 } else { np.y + 20.0 };
+                        let x = (np.x - w * 0.5).clamp(gr.left() + 4.0, gr.right() - 4.0 - w);
+                        let tb = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bh + 8.0));
+                        // the gap between the dot and the bar counts as "on it"
+                        let zone = tb.union(Rect::from_center_size(np, Vec2::splat(24.0)));
+                        if pointer.is_some_and(|pp| zone.contains(pp)) {
+                            st.hbar = Some((i, now));
+                        }
+                        if now - t > 0.35 && !pointer.is_some_and(|pp| zone.contains(pp)) {
+                            st.hbar = None;
+                        } else {
+                            let b = &p.bands[i];
+                            let bv = views[i];
+                            let col = band_col(i);
+                            let _ = ui.interact(tb, egui::Id::new("hbar_bg"), Sense::click());
+                            painter.rect_filled(tb, CornerRadius::same(6), Color32::from_rgba_unmultiplied(14, 15, 18, 240));
+                            painter.rect_stroke(tb, CornerRadius::same(6), Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 140)), StrokeKind::Inside);
+                            let br = |k: f32| Rect::from_min_size(Pos2::new(tb.left() + 4.0 + k * (bw + gap), tb.top() + 4.0), Vec2::new(bw, bh));
+                            // power
+                            let on = b.on.value();
+                            let r0 = br(0.0);
+                            if tbtn(ui, r0, "", on, "Band on / off").clicked() {
+                                set_b(setter, &b.on, !on);
+                            }
+                            let pc = if on { Color32::BLACK } else { WHITE };
+                            let c0 = r0.center() + Vec2::new(0.0, 1.0);
+                            let arc: Vec<Pos2> = (0..=20)
+                                .map(|k| {
+                                    let a = -std::f32::consts::FRAC_PI_2 + 0.6 + (2.0 * std::f32::consts::PI - 1.2) * k as f32 / 20.0;
+                                    c0 + Vec2::new(a.cos(), a.sin()) * 5.0
+                                })
+                                .collect();
+                            painter.add(egui::Shape::line(arc, PathStroke::new(1.4_f32, pc)));
+                            painter.line_segment([c0 - Vec2::new(0.0, 7.0), c0 - Vec2::new(0.0, 2.0)], Stroke::new(1.4_f32, pc));
+                            // shape (pop-up list)
+                            let r1 = br(1.0);
+                            let sresp = tbtn(ui, r1, "", false, "Shape");
+                            shape_icon(&painter, r1.shrink2(Vec2::new(3.0, 4.0)), bv.spec.shape, col);
+                            let sid = ui.make_persistent_id(("hbar_shape", i));
+                            if sresp.clicked() {
+                                ui.memory_mut(|m| m.toggle_popup(sid));
+                            }
+                            egui::popup_below_widget(ui, sid, &sresp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                                ui.set_min_width(130.0);
+                                for sh2 in Shape::ALL {
+                                    if ui.selectable_label(bv.spec.shape == sh2, egui::RichText::new(sh2.short()).font(mono(11.5))).clicked() {
+                                        set_e(setter, &b.shape, sh2);
+                                    }
+                                }
+                            });
+                            if ui.memory(|m| m.is_popup_open(sid)) {
+                                st.hbar = Some((i, now));
+                            }
+                            // dynamics
+                            let r2 = br(2.0);
+                            if bv.spec.shape.has_gain() {
+                                if tbtn(ui, r2, "D", bv.dynamic, "Make the band dynamic / static").clicked() {
+                                    set_f(setter, &b.dyn_range, if bv.dynamic { 0.0 } else if b.gain.value() > 0.0 { 6.0 } else { -6.0 });
+                                }
+                            } else {
+                                painter.text(r2.center(), Align2::CENTER_CENTER, "·", mono(10.0), DIM);
+                            }
+                            // solo (hold)
+                            let r3 = br(3.0);
+                            let solo = tbtn(ui, r3, "S", sh.solo.load(Ordering::Relaxed) == i as i32, "Hold to hear only this band's range");
+                            let cur = sh.solo.load(Ordering::Relaxed);
+                            if solo.is_pointer_button_down_on() {
+                                sh.solo.store(i as i32, Ordering::Relaxed);
+                            } else if cur == i as i32 && !ui.input(|inp| inp.pointer.primary_down()) {
+                                sh.solo.store(-1, Ordering::Relaxed);
+                            }
+                            // delete
+                            if tbtn(ui, br(4.0), "x", false, "Delete the band").clicked() {
+                                delete_band(setter, b);
+                                st.sel[i] = false;
+                                if st.focus == Some(i) {
+                                    st.focus = None;
+                                }
+                                st.hbar = None;
+                            }
+                        }
+                    }
                 }
 
                 // display range (top right)
@@ -1233,6 +1338,13 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     set_e(setter, &p.disp, next);
                 }
 
+                // ---------------- band strip
+                let strip = rect(14.0, STRIP_Y, BASE_W - 28.0, 152.0);
+                panel(ui, strip);
+                if panel_rect.is_none() {
+                    painter.text(strip.center() - Vec2::new(0.0, 12.0), Align2::CENTER_CENTER, "click a dot to edit its band   ·   double-click the display to add one   ·   Alt + double-click: dynamic band", mono(10.5), DIM);
+                    painter.text(strip.center() + Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, "drag: frequency / gain   ·   wheel: Q   ·   Alt + wheel: dynamic range   ·   right-click: menu   ·   double-click a dot: delete", mono(9.5), DIM);
+                }
                 // ---------------- band panel
                 if let (Some(i), Some(pr)) = (st.focus, panel_rect) {
                     let b = &p.bands[i];
@@ -1240,7 +1352,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let col = band_col(i);
                     let has_gain = bv.spec.shape.has_gain();
                     let _ = ui.interact(pr, egui::Id::new("band_panel_bg"), Sense::click_and_drag());
-                    painter.rect_filled(pr, CornerRadius::same(10), Color32::from_rgba_unmultiplied(16, 17, 20, 236));
+                    painter.rect_filled(pr, CornerRadius::same(10), Color32::from_rgb(16, 17, 20));
                     painter.rect_stroke(pr, CornerRadius::same(10), Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 110)), StrokeKind::Inside);
                     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(Pos2::new(pr.left() + x, pr.top() + y), Vec2::new(w, h));
                     // top corners: band power and delete
@@ -1301,7 +1413,8 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let ear = tbtn(ui, at(534.0, 72.0, 56.0, 24.0), "SOLO", sh.solo.load(Ordering::Relaxed) == i as i32, "Hold to hear only the part of the spectrum this band works on.");
                     let holding = ear.is_pointer_button_down_on();
                     let cur_solo = sh.solo.load(Ordering::Relaxed);
-                    sh.solo.store(if holding { i as i32 } else if cur_solo == i as i32 { -1 } else { cur_solo }, Ordering::Relaxed);
+                    let mouse_down = ui.input(|inp| inp.pointer.primary_down());
+                    sh.solo.store(if holding { i as i32 } else if cur_solo == i as i32 && !mouse_down { -1 } else { cur_solo }, Ordering::Relaxed);
                     if has_gain && tbtn(ui, at(472.0, 104.0, 118.0, 24.0), if st.dyn_open { "DYNAMICS «" } else { "DYNAMICS »" }, st.dyn_open || bv.dynamic, "Dynamics settings: threshold, attack, release, spectral mode, side chain.").clicked() {
                         st.dyn_open = !st.dyn_open;
                     }
@@ -1383,7 +1496,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
 
                 // ---------------- analyzer pop-up (closes on a click anywhere else)
                 if let Some(ar) = ana_rect {
-                    let btn = rect(320.0, 622.0 + 24.0, 130.0, 26.0);
+                    let btn = rect(320.0, BAR_Y + 24.0, 130.0, 26.0);
                     if ui.input(|i| i.pointer.any_pressed()) && pointer.is_some_and(|pp| !ar.contains(pp) && !btn.contains(pp)) {
                         st.pop = Pop::None;
                     }
@@ -1481,7 +1594,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 }
 
                 // ---------------- bottom bar
-                let by = 622.0;
+                let by = BAR_Y;
                 let bar = rect(14.0, by, BASE_W - 28.0, 70.0);
                 panel(ui, bar);
                 let blab = |x: f32, t: &str| painter.text(Pos2::new(o.x + x, o.y + by + 13.0), Align2::LEFT_CENTER, t, mono(8.5), DIM);

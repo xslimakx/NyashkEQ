@@ -31,6 +31,7 @@ pub struct Shared {
     pub lvl_db: [AtomicU32; NB],
     pub thr_db: [AtomicU32; NB],
     pub solo: AtomicI32,
+    pub solo_gain: AtomicU32,
     pub dyn_blocked: AtomicBool,
     pub has_sc: AtomicBool,
     /// spectral dynamics: total gain per FFT bin (dB) and the FFT length
@@ -53,6 +54,7 @@ impl Shared {
             lvl_db: std::array::from_fn(|_| AtomicU32::new((-120f32).to_bits())),
             thr_db: std::array::from_fn(|_| AtomicU32::new((-30f32).to_bits())),
             solo: AtomicI32::new(-1),
+            solo_gain: AtomicU32::new(0f32.to_bits()),
             dyn_blocked: AtomicBool::new(false),
             has_sc: AtomicBool::new(false),
             sp_show: (0..8200).map(|_| AtomicU32::new(0)).collect(),
@@ -188,7 +190,9 @@ impl Plugin for NyashkEQ {
         let mut i = 0;
         while i < n {
             let len = (n - i).min(16);
-            e.set(&settings(p, len as u32, solo));
+            let mut st = settings(p, len as u32, solo);
+            st.solo_gain = Shared::get(&self.shared.solo_gain);
+            e.set(&st);
             for k in i..i + len {
                 let x = [out[0][k], if nch > 1 { out[1][k] } else { 0.0 }];
                 let sc = match &sc_buf {

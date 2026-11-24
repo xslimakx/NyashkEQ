@@ -81,11 +81,13 @@ pub struct Settings {
     pub bypass: bool,
     /// band being auditioned (-1: none)
     pub solo: i32,
+    /// solo listening level (dB)
+    pub solo_gain: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { bands: [BandIn::default(); NB], pmode: PMode::Zero, res: Res::Medium, character: Character::Clean, auto_gain: false, gain_scale: 1.0, out_db: 0.0, pan: 0.0, phase: false, bypass: false, solo: -1 }
+        Self { bands: [BandIn::default(); NB], pmode: PMode::Zero, res: Res::Medium, character: Character::Clean, auto_gain: false, gain_scale: 1.0, out_db: 0.0, pan: 0.0, phase: false, bypass: false, solo: -1, solo_gain: 0.0 }
     }
 }
 
@@ -860,7 +862,7 @@ impl Engine {
             let w = ss(self.solo_x);
             for c in 0..nch {
                 let a = self.solo_f[c].tick(&self.solo_c.0, dry[c]);
-                let s = self.solo_f[2 + c].tick(&self.solo_c.1, a);
+                let s = self.solo_f[2 + c].tick(&self.solo_c.1, a) * 10f32.powf(self.cur.solo_gain / 20.0);
                 y[c] += (s - y[c]) * w;
             }
         }

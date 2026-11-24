@@ -120,12 +120,14 @@ struct Det {
     f2: [Bq; 2],
     env: f64,
     slow: f64,
+    /// control ticks left in which the auto threshold follows the level instantly (onset)
+    onset: u32,
     key: [f32; 6],
 }
 
 impl Default for Det {
     fn default() -> Self {
-        Self { c: (Coef::THRU, Coef::THRU), f1: Default::default(), f2: Default::default(), env: 0.0, slow: -100.0, key: [0.0; 6] }
+        Self { c: (Coef::THRU, Coef::THRU), f1: Default::default(), f2: Default::default(), env: 0.0, slow: -100.0, onset: 0, key: [0.0; 6] }
     }
 }
 
@@ -480,10 +482,24 @@ impl Engine {
                 b.det.configure(fs as f32, &bi);
                 let lvl = b.det.level_db();
                 if lvl > -80.0 {
-                    let a = 1.0 - (-16.0 / (1.5 * fs)).exp();
+                    // the signal's own recent level (up ~0.8 s, down ~2 s): bursts above it are
+                    // caught, a held note is not
+                    let t = if lvl > b.det.slow { 0.8 } else { 2.0 };
+                    let a = 1.0 - (-16.0 / (t * fs)).exp();
+                    if b.det.slow < -79.0 {
+                        // sound after silence: for 60 ms the threshold follows it at once
+                        b.det.onset = (0.06 * fs / 16.0) as u32;
+                    }
+                    if b.det.onset > 0 {
+                        b.det.onset -= 1;
+                        b.det.slow = lvl;
+                    }
                     b.det.slow += (lvl - b.det.slow) * a;
+                } else {
+                    // long silence: forget, so the next phrase starts fresh
+                    b.det.slow += (-100.0 - b.det.slow) * (1.0 - (-16.0 / (3.0 * fs)).exp());
                 }
-                let thr = if bi.thr_auto { b.det.slow + 2.0 } else { bi.thr };
+                let thr = if bi.thr_auto { b.det.slow + 5.0 } else { bi.thr };
                 self.lvl_out[i] = lvl as f32;
                 self.thr_out[i] = thr as f32;
                 let target = if dynamic && lvl > -90.0 {
@@ -681,7 +697,7 @@ impl Engine {
     fn det_coefs(&self, i: usize) -> (f64, f64) {
         let b = &self.cur.bands[i];
         let f = if b.sc_free { (b.sc_lo * b.sc_hi).sqrt() } else { b.spec.freq };
-        let a0 = (2000.0 / f.max(10.0)).clamp(0.5, 30.0);
+        let a0 = (4000.0 / f.max(10.0)).clamp(1.0, 40.0);
         let r0 = (a0 * 10.0).clamp(30.0, 300.0);
         let fa = 10f64.powf((b.att - 0.5) * 2.0);
         let fr = 10f64.powf((b.rel - 0.5) * 2.0);

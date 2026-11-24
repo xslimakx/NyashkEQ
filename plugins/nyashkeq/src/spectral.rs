@@ -101,7 +101,7 @@ impl Spectral {
             weight: (0..NB).map(|_| vec![0.0; bins]).collect(),
             wkey: [None; NB],
             gain: (0..NB).map(|_| vec![0.0; bins]).collect(),
-            avg: [-60.0; NB],
+            avg: [-100.0; NB],
             bands: [None; NB],
             cnorm: (2.0 / wsum).powi(2),
             tiltv,
@@ -226,7 +226,12 @@ impl Spectral {
             }
             let band_db = if sw > 0.0 { (10.0 * (sp / sw + 1e-14).log10()) as f32 } else { -140.0 };
             if band_db > -90.0 {
-                self.avg[b] += (band_db - self.avg[b]) * 0.02;
+                if self.avg[b] < -89.0 {
+                    self.avg[b] = band_db;
+                }
+                self.avg[b] += (band_db - self.avg[b]) * 0.03;
+            } else {
+                self.avg[b] += (-100.0 - self.avg[b]) * 0.005;
             }
             let thr = if sb.thr_auto { self.avg[b] + 6.0 } else { sb.thr as f32 };
             let d = sb.density.clamp(0.0, 1.0) as f32;

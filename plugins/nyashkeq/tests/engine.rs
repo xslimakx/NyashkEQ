@@ -340,3 +340,50 @@ fn spectral_band_cuts_only_the_resonance() {
     assert!(tone_db < -8.0, "tone {tone_db}");
     assert!(nz_db > -1.5, "noise {nz_db}");
 }
+
+#[test]
+fn mono_track_every_mode() {
+    for mode in [PMode::Zero, PMode::Natural, PMode::Linear] {
+        let mut b = band(Shape::Bell, Slope::S12, 1000.0, 6.0, 1.0);
+        b.dyn_range = -3.0;
+        let mut b2 = band(Shape::HighShelf, Slope::S12, 6000.0, -4.0, 1.0);
+        b2.place = Place::Side; // ignored on mono
+        let mut b3 = band(Shape::Bell, Slope::S24, 300.0, -6.0, 2.0);
+        b3.spectral = true;
+        b3.dyn_range = -6.0;
+        let s = settings(mode, &[b, b2, b3]);
+        let mut e = engine(&s, 1);
+        let (g, _) = sine_gain(&mut e, 1000.0, 0.05, 0.0);
+        assert!((g - 6.0).abs() < 0.5, "{mode:?} mono: {g}");
+    }
+}
+
+/// auto threshold: a held note is left alone, a sudden +12 dB burst in the band is pulled down
+#[test]
+fn auto_threshold_catches_bursts_not_held_notes() {
+    let mut b = band(Shape::Bell, Slope::S12, 1000.0, 0.0, 1.0);
+    b.dyn_range = -9.0;
+    let s = settings(PMode::Zero, &[b]);
+    let mut e = engine(&s, 2);
+    let n = FS as usize * 3;
+    let (mut held_i, mut held_o, mut burst_i, mut burst_o) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for i in 0..n {
+        let t = i as f64 / FS;
+        let amp = if (2.0..2.15).contains(&t) { 0.4 } else { 0.1 };
+        let x = ((2.0 * PI * 1000.0 * t).sin() * amp) as f32;
+        let y = e.process([x, x], [0.0, 0.0])[0];
+        if (1.5..1.9).contains(&t) {
+            held_i += (x as f64).powi(2);
+            held_o += (y as f64).powi(2);
+        }
+        if (2.05..2.15).contains(&t) {
+            burst_i += (x as f64).powi(2);
+            burst_o += (y as f64).powi(2);
+        }
+    }
+    let held = 10.0 * (held_o / held_i).log10();
+    let burst = 10.0 * (burst_o / burst_i).log10();
+    eprintln!("auto threshold: held note {held:.2} dB, burst {burst:.2} dB");
+    assert!(held > -0.7, "held {held}");
+    assert!(burst < -4.0, "burst {burst}");
+}

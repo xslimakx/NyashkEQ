@@ -24,7 +24,7 @@ use crate::Shared;
 pub const BASE_W: f32 = 1100.0;
 pub const BASE_H: f32 = 660.0;
 /// top of the bottom bar
-const BAR_Y: f32 = 634.0;
+const BAR_Y: f32 = 628.0;
 /// width of the output meter column on the right
 const METER_W: f32 = 44.0;
 const F_LO: f32 = 10.0;
@@ -37,28 +37,78 @@ fn fit_f(j: usize) -> f32 {
     20.0 * 2f32.powf(j as f32 / 12.0)
 }
 
-/// band colours (our own palette, 12 hues, then repeated a little lighter)
+/// band colours: our own palette, evenly spaced hues at one saturation / lightness so no band
+/// shouts louder than another
 fn band_col(i: usize) -> Color32 {
-    const P: [(u8, u8, u8); 12] = [
-        (255, 122, 122),
-        (255, 176, 92),
-        (246, 222, 102),
-        (150, 226, 120),
-        (92, 214, 170),
-        (88, 200, 236),
-        (110, 150, 255),
-        (168, 128, 255),
-        (226, 116, 236),
-        (255, 116, 180),
-        (200, 200, 210),
-        (140, 236, 220),
-    ];
-    let (r, g, b) = P[i % 12];
-    if i < 12 {
-        Color32::from_rgb(r, g, b)
-    } else {
-        Color32::from_rgb(r / 2 + 110, g / 2 + 110, b / 2 + 110)
-    }
+    let order = [0usize, 5, 2, 7, 4, 9, 1, 6, 3, 8, 10, 11];
+    let h = (order[i % 12] as f32 / 12.0 + 0.97) % 1.0;
+    let (s, l) = if i < 12 { (0.78f32, 0.64f32) } else { (0.55, 0.74) };
+    // HSL -> RGB
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h * 6.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c * 0.5;
+    let to = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(to(r), to(g), to(b))
+}
+
+// ---- design tokens: 4 surface levels, 2 text levels, one brand accent (amber), band colours
+const C_BG: Color32 = Color32::from_rgb(13, 14, 18);
+const C_SURF: Color32 = Color32::from_rgb(22, 24, 30);
+const C_BTN: Color32 = Color32::from_rgb(32, 35, 43);
+const C_BTN_H: Color32 = Color32::from_rgb(44, 48, 58);
+const C_BORDER: Color32 = Color32::from_rgb(40, 44, 54);
+const C_TXT: Color32 = Color32::from_rgb(232, 234, 239);
+const C_TXT2: Color32 = Color32::from_rgb(138, 145, 160);
+
+/// undo / redo arrow (dir -1 / 1)
+fn icon_arrow(painter: &egui::Painter, c: Pos2, dir: f32, col: Color32) {
+    let pts: Vec<Pos2> = (0..=14)
+        .map(|k| {
+            let a = std::f32::consts::PI * (1.15 - 0.95 * k as f32 / 14.0);
+            c + Vec2::new(-dir * a.cos() * 5.0, -a.sin() * 5.0 + 2.0)
+        })
+        .collect();
+    let tip = pts[0];
+    painter.add(egui::Shape::line(pts, PathStroke::new(1.4_f32, col)));
+    painter.line_segment([tip, tip + Vec2::new(dir * 3.5, -1.0)], Stroke::new(1.4_f32, col));
+    painter.line_segment([tip, tip + Vec2::new(dir * 1.0, -3.8)], Stroke::new(1.4_f32, col));
+}
+
+/// scissors (split)
+fn icon_split(painter: &egui::Painter, c: Pos2, col: Color32) {
+    painter.circle_stroke(c + Vec2::new(-3.5, 3.5), 2.2, Stroke::new(1.3_f32, col));
+    painter.circle_stroke(c + Vec2::new(3.5, 3.5), 2.2, Stroke::new(1.3_f32, col));
+    painter.line_segment([c + Vec2::new(-2.0, 1.6), c + Vec2::new(3.0, -5.0)], Stroke::new(1.3_f32, col));
+    painter.line_segment([c + Vec2::new(2.0, 1.6), c + Vec2::new(-3.0, -5.0)], Stroke::new(1.3_f32, col));
+}
+
+/// x
+fn icon_close(painter: &egui::Painter, c: Pos2, col: Color32) {
+    let e = 3.8;
+    painter.line_segment([c + Vec2::new(-e, -e), c + Vec2::new(e, e)], Stroke::new(1.4_f32, col));
+    painter.line_segment([c + Vec2::new(-e, e), c + Vec2::new(e, -e)], Stroke::new(1.4_f32, col));
+}
+
+/// small caption (uppercase, dim)
+fn caption(painter: &egui::Painter, pos: Pos2, align: Align2, t: &str) {
+    painter.text(pos, align, t, mono(8.5), C_TXT2);
+}
+
+/// icon button: same size / radius as the text buttons, the icon drawn by `draw`
+fn ibtn(ui: &mut Ui, r: Rect, on: bool, tip: &str, draw: impl FnOnce(&egui::Painter, Pos2, Color32)) -> egui::Response {
+    let resp = tbtn(ui, r, "", on, tip);
+    let col = if on { Color32::BLACK } else { C_TXT };
+    draw(ui.painter(), r.center(), col);
+    resp
 }
 
 /// theme: the shared Nyashk colours plus the Inter typeface (SIL Open Font License, see
@@ -83,6 +133,26 @@ fn eq_theme(ctx: &egui::Context) {
     ctx.set_visuals(v);
 }
 
+/// area between a curve and a base line, strong at the curve and fading towards the base
+fn grad_fill(painter: &egui::Painter, pts: &[Pos2], base: f32, col: Color32, a_curve: u8, a_base: u8) {
+    if pts.len() < 2 {
+        return;
+    }
+    let mut m = egui::Mesh::default();
+    let ct = Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a_curve);
+    let cb = Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a_base);
+    for q in pts {
+        m.colored_vertex(*q, ct);
+        m.colored_vertex(Pos2::new(q.x, base), cb);
+    }
+    for k in 0..pts.len() as u32 - 1 {
+        let i = 2 * k;
+        m.add_triangle(i, i + 1, i + 2);
+        m.add_triangle(i + 1, i + 3, i + 2);
+    }
+    painter.add(egui::Shape::mesh(m));
+}
+
 /// vertical gradient rectangle
 fn grad(painter: &egui::Painter, r: Rect, top: Color32, bottom: Color32) {
     let mut m = egui::Mesh::default();
@@ -102,7 +172,7 @@ fn glass(painter: &egui::Painter, r: Rect, accent: Option<Color32>) {
         let e = k as f32 * 2.0;
         painter.rect_filled(r.translate(Vec2::new(0.0, 4.0)).expand(e), CornerRadius::same(12 + 2 * k as u8), Color32::from_black_alpha(18));
     }
-    painter.rect_filled(r, rr, Color32::from_rgb(23, 25, 30));
+    painter.rect_filled(r, rr, Color32::from_rgba_unmultiplied(22, 24, 30, 236));
     let bc = accent.map(|c| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 70)).unwrap_or(Color32::from_rgb(40, 43, 51));
     painter.rect_stroke(r, rr, Stroke::new(1.0_f32, bc), StrokeKind::Inside);
 }
@@ -655,17 +725,18 @@ fn lbtn(ui: &mut Ui, r: Rect, text: &str, on: bool, tip: &str) -> egui::Response
     resp
 }
 
-/// small button: flat, a soft fill only, white when on
+/// button: flat fill, 6 px radius, white when on
 fn tbtn(ui: &mut Ui, r: Rect, text: &str, on: bool, tip: &str) -> egui::Response {
     let resp = ui.allocate_rect(r, Sense::click());
     let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
     let p = ui.painter();
     let hov = resp.hovered();
-    let rr = CornerRadius::same(((r.height() * 0.5) as u8).min(8));
-    p.rect_filled(r, rr, if on { Color32::from_rgb(235, 236, 240) } else if hov { Color32::from_white_alpha(26) } else { Color32::from_white_alpha(11) });
-    let gw = ui.fonts(|f| f.layout_no_wrap(text.to_string(), mono(10.5), WHITE).size().x);
-    let size = if gw > r.width() - 6.0 { (10.5 * (r.width() - 6.0) / gw).max(7.0) } else { 10.5 };
-    p.text(r.center(), Align2::CENTER_CENTER, text, mono(size), if on { Color32::BLACK } else { WHITE });
+    p.rect_filled(r, CornerRadius::same(6), if on { C_TXT } else if hov { C_BTN_H } else { C_BTN });
+    if !text.is_empty() {
+        let gw = ui.fonts(|f| f.layout_no_wrap(text.to_string(), mono(11.0), WHITE).size().x);
+        let size = if gw > r.width() - 8.0 { (11.0 * (r.width() - 8.0) / gw).max(7.5) } else { 11.0 };
+        p.text(r.center(), Align2::CENTER_CENTER, text, mono(size), if on { Color32::BLACK } else { C_TXT });
+    }
     resp
 }
 
@@ -904,11 +975,11 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 let painter = ui.painter().clone();
                 painter.rect_filled(gr, CornerRadius::ZERO, Color32::from_rgb(8, 9, 12));
                 let clip = painter.with_clip_rect(gr.shrink(1.0));
-                clip.rect_filled(gr, CornerRadius::ZERO, Color32::from_rgb(14, 15, 19));
+                grad(&clip, gr, Color32::from_rgb(20, 22, 28), Color32::from_rgb(11, 12, 15));
                 let piano = p.piano.value();
                 for f in [20.0f32, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 800.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 8000.0, 10000.0, 20000.0] {
                     let major = matches!(f as i32, 20 | 50 | 100 | 200 | 500 | 1000 | 2000 | 5000 | 10000 | 20000);
-                    clip.vline(d.fx(f), gr.top()..=gr.bottom(), Stroke::new(1.0_f32, Color32::from_white_alpha(if major { 13 } else { 5 })));
+                    clip.vline(d.fx(f), gr.top()..=gr.bottom(), Stroke::new(1.0_f32, Color32::from_white_alpha(if major { 10 } else { 4 })));
                 }
                 let step = match rng as i32 {
                     3 => 1.0,
@@ -919,13 +990,15 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 let mut v = -(rng / step).floor() * step;
                 while v <= rng + 0.01 {
                     let y = d.dy(v);
-                    clip.hline(gr.left()..=gr.right(), y, Stroke::new(1.0_f32, Color32::from_white_alpha(if v == 0.0 { 28 } else { 8 })));
-                    clip.text(Pos2::new(gr.right() - 36.0, y - 1.0), Align2::RIGHT_BOTTOM, if v == 0.0 { "0".into() } else { format!("{:+.0}", v) }, mono(9.0), if v == 0.0 { MID } else { DIM });
+                    clip.hline(gr.left()..=gr.right(), y, Stroke::new(1.0_f32, Color32::from_white_alpha(if v == 0.0 { 24 } else { 6 })));
+                    clip.text(Pos2::new(gr.right() - 8.0, y - 1.0), Align2::RIGHT_BOTTOM, if v == 0.0 { "0".into() } else { format!("{:+.0}", v) }, mono(9.5), if v == 0.0 { C_TXT } else { C_TXT2 });
                     v += step;
                 }
                 let mut a = 0.0f32;
                 while a >= -d.an_range + 0.1 {
-                    clip.text(Pos2::new(gr.right() - 6.0, d.sy(a)), Align2::RIGHT_CENTER, format!("{:.0}", a), mono(8.5), Color32::from_rgb(70, 78, 90));
+                    if a < -1.0 {
+                        clip.text(Pos2::new(gr.left() + 8.0, d.sy(a)), Align2::LEFT_CENTER, format!("{:.0}", a), mono(8.5), Color32::from_rgb(78, 84, 98));
+                    }
                     a -= if d.an_range > 90.0 { 20.0 } else { 10.0 };
                 }
                 // analyzer
@@ -936,8 +1009,8 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 let sc_pts = if p.an_sc.value() { Some(st.sc.points(&d, fs, tilt, 320)) } else { None };
                 if let Some(pp) = &pre_pts {
                     let pts = to_pts(pp);
-                    fill_under(&clip, &smooth_line(&pts, 2), gr.bottom(), Color32::from_rgba_unmultiplied(120, 128, 145, 22));
-                    clip.add(egui::Shape::line(smooth_line(&pts, 2), PathStroke::new(1.0_f32, Color32::from_rgb(58, 66, 80))));
+                    grad_fill(&clip, &smooth_line(&pts, 2), gr.bottom(), Color32::from_rgb(120, 130, 150), 30, 2);
+                    clip.add(egui::Shape::line(smooth_line(&pts, 2), PathStroke::new(1.0_f32, Color32::from_rgba_unmultiplied(150, 160, 180, 70))));
                 }
                 if let Some(pp) = &post_pts {
                     clip.add(egui::Shape::line(smooth_line(&to_pts(pp), 2), PathStroke::new(1.2_f32, Color32::from_rgb(150, 160, 178))));
@@ -1007,11 +1080,11 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let hot = st.focus == Some(i) || st.hover == Some(i) || st.sel[i] || st.pbox.is_some_and(|q| q.0 == i);
                     let dim = soloing && solo_now as usize != i;
                     let pts: Vec<Pos2> = xs.iter().zip(st.cache[i].1.iter()).map(|(&x, &v)| Pos2::new(x, d.dy(clampc(v)))).collect();
-                    let alpha = if !bv.on || dim { 40 } else if hot { 235 } else { 150 };
+                    let alpha = if !bv.on || dim { 40 } else if hot { 255 } else { 170 };
                     if bv.on && !dim {
-                        fill_under(&clip, &pts, zero, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), if hot { 56 } else { 26 }));
+                        grad_fill(&clip, &pts, zero, col, if hot { 120 } else { 62 }, if hot { 14 } else { 4 });
                     }
-                    clip.add(egui::Shape::line(pts, PathStroke::new(if hot { 1.6_f32 } else { 1.0 }, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), alpha))));
+                    clip.add(egui::Shape::line(pts, PathStroke::new(if hot { 2.0_f32 } else { 1.3 }, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), alpha))));
                     if bv.dynamic && bv.on && hot {
                         let mut s2 = bv.spec;
                         s2.gain_db = (s2.gain_db + bv.range as f64).clamp(-30.0, 30.0);
@@ -1043,7 +1116,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 }
                 let main = line_of(&tot_a);
                 if !split {
-                    fill_under(&clip, &main, zero, Color32::from_white_alpha(9));
+                    grad_fill(&clip, &main, zero, WHITE, 16, 0);
                 }
                 if !byp && !soloing {
                     clip.add(egui::Shape::line(main.clone(), PathStroke::new(5.0_f32, Color32::from_white_alpha(14))));
@@ -1056,14 +1129,14 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let y = if bv.spec.shape.has_gain() { bv.spec.gain_db as f32 } else { 0.0 };
                     Pos2::new(d.fx(bv.spec.freq as f32).clamp(gr.left() + 6.0, gr.right() - 6.0), d.dy(y.clamp(-rng, rng)).clamp(gr.top() + 6.0, gr.bottom() - 6.0))
                 };
-                let panel_w = |i: usize| if st.dyn_open && views[i].spec.shape.has_gain() { 930.0 } else { 520.0 };
+                let panel_w = |i: usize| if st.dyn_open && views[i].spec.shape.has_gain() { 932.0 } else { 552.0 };
                 let panel_rect = st.focus.filter(|&i| views[i].used).map(|i| {
                     let w = panel_w(i);
-                    let h = 104.0;
+                    let h = 120.0;
                     let cx = node_pos(i).x.clamp(gr.left() + w * 0.5 + 6.0, gr.right() - w * 0.5 - 6.0);
                     Rect::from_min_size(Pos2::new(cx - w * 0.5, gr.bottom() - h - 24.0), Vec2::new(w, h))
                 });
-                let ana_btn = rect(600.0, BAR_Y + 2.0, 170.0, 22.0);
+                let ana_btn = rect(606.0, BAR_Y + 4.0, 150.0, 24.0);
                 let ana_rect = if st.pop != Pop::None { Some(Rect::from_min_size(Pos2::new(ana_btn.left() - 140.0, ana_btn.top() - 222.0), Vec2::new(440.0, 214.0))) } else { None };
                 // the parameter display box of the band under the mouse (beside its dot)
                 let pbox_rect = |i: usize| -> Rect {
@@ -1412,7 +1485,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         let mut v = Vec::with_capacity(NPTS + 1);
                         resp(&spec, &d, &mut v);
                         let pts: Vec<Pos2> = xs.iter().zip(v.iter()).map(|(&x, &v)| Pos2::new(x, d.dy(clampc(v)))).collect();
-                        let col = Color32::from_white_alpha(if any_sel { 50 } else { 70 });
+                        let col = Color32::from_white_alpha(if any_sel { 34 } else { 60 });
                         if any_sel {
                             clip.add(egui::Shape::dashed_line(&pts, Stroke::new(1.0_f32, col), 5.0, 4.0));
                         } else {
@@ -1487,6 +1560,11 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         painter.line_segment([pos, Pos2::new(pos.x, ny)], Stroke::new(3.0_f32, C_DYN));
                     }
                     let fill = if !bv.on || dim { Color32::from_rgb(24, 24, 26) } else { col };
+                    if (selected || hot) && bv.on {
+                        for (e, a) in [(10.0, 14u8), (6.0, 26)] {
+                            painter.circle_filled(pos, rad + e, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a));
+                        }
+                    }
                     // flat dot: a ring of the background colour separates it from the curves
                     painter.circle_filled(pos, rad + 2.0, Color32::from_rgb(14, 15, 19));
                     painter.circle_filled(pos, rad, fill);
@@ -1513,15 +1591,16 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     painter.rect_stroke(rr, CornerRadius::same(2), Stroke::new(1.0_f32, Color32::BLACK), StrokeKind::Inside);
                 }
 
-                // ---------------- top bar, over the display: name, undo / redo, A / B, copy, bypass, range
-                let tb = Rect::from_min_size(gr.min, Vec2::new(gr.width(), 28.0));
-                painter.rect_filled(tb, CornerRadius::ZERO, Color32::from_rgb(14, 15, 19));
-                painter.hline(tb.left()..=tb.right(), tb.bottom(), Stroke::new(1.0_f32, Color32::from_rgb(28, 30, 36)));
-                painter.text(Pos2::new(tb.left() + 14.0, tb.center().y), Align2::LEFT_CENTER, "Nyashk", mono(13.0), WHITE);
-                painter.text(Pos2::new(tb.left() + 14.0 + 6.0 * 7.9, tb.center().y), Align2::LEFT_CENTER, "EQ", mono(13.0), C_DYN);
+                // ---------------- top bar: brand | undo redo · A/B · copy | bypass · range
+                let tb = Rect::from_min_size(gr.min, Vec2::new(gr.width(), 34.0));
+                painter.rect_filled(tb, CornerRadius::ZERO, C_BG);
+                painter.hline(tb.left()..=tb.right(), tb.bottom(), Stroke::new(1.0_f32, C_BORDER));
+                painter.text(Pos2::new(tb.left() + 16.0, tb.center().y), Align2::LEFT_CENTER, "Nyashk", mono(14.0), C_TXT);
+                let nw = ui.fonts(|f| f.layout_no_wrap("Nyashk".into(), mono(14.0), WHITE).size().x);
+                painter.text(Pos2::new(tb.left() + 18.0 + nw, tb.center().y), Align2::LEFT_CENTER, "EQ", mono(14.0), C_DYN);
                 let cx = tb.center().x;
-                let tr = |x: f32, w: f32| Rect::from_min_size(Pos2::new(cx + x, tb.top() + 4.0), Vec2::new(w, 20.0));
-                if lbtn(ui, tr(-150.0, 24.0), "↶", false, "Undo").clicked() && st.undo.len() > 1 {
+                let tr = |x: f32, w: f32| Rect::from_min_size(Pos2::new(cx + x, tb.top() + 5.0), Vec2::new(w, 24.0));
+                if ibtn(ui, tr(-132.0, 28.0), false, "Undo", |pt, c, col| icon_arrow(pt, c, -1.0, col)).clicked() && st.undo.len() > 1 {
                     let cur = st.undo.pop().unwrap();
                     st.redo.push(cur);
                     if let Some(prev) = st.undo.last() {
@@ -1529,32 +1608,43 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     }
                     st.pending_snap = false;
                 }
-                if lbtn(ui, tr(-124.0, 24.0), "↷", false, "Redo").clicked() {
+                if ibtn(ui, tr(-100.0, 28.0), false, "Redo", |pt, c, col| icon_arrow(pt, c, 1.0, col)).clicked() {
                     if let Some(sn) = st.redo.pop() {
                         restore(setter, p, &sn);
                         st.undo.push(sn);
                     }
                     st.pending_snap = false;
                 }
+                // A / B as one segmented control
+                let seg = tr(-56.0, 56.0);
+                painter.rect_filled(seg, CornerRadius::same(6), C_BTN);
                 for (k, name) in [(0usize, "A"), (1, "B")] {
-                    if lbtn(ui, tr(-88.0 + k as f32 * 22.0, 20.0), name, st.ab_cur == k, "A / B: two settings to compare").clicked() && st.ab_cur != k {
+                    let r = Rect::from_min_size(seg.min + Vec2::new(2.0 + k as f32 * 26.0, 2.0), Vec2::new(26.0, 20.0));
+                    let resp = ui.allocate_rect(r, Sense::click()).on_hover_text("A / B: two settings to compare");
+                    if st.ab_cur == k {
+                        painter.rect_filled(r, CornerRadius::same(5), C_TXT);
+                    } else if resp.hovered() {
+                        painter.rect_filled(r, CornerRadius::same(5), C_BTN_H);
+                    }
+                    painter.text(r.center(), Align2::CENTER_CENTER, name, mono(11.0), if st.ab_cur == k { Color32::BLACK } else { C_TXT });
+                    if resp.clicked() && st.ab_cur != k {
                         st.ab[st.ab_cur] = Some(snapshot(p));
                         let other = st.ab[k].clone().unwrap_or_else(|| snapshot(p));
                         restore(setter, p, &other);
                         st.ab_cur = k;
                     }
                 }
-                if lbtn(ui, tr(-42.0, 44.0), "Copy", false, if st.ab_cur == 0 { "Copy A to B" } else { "Copy B to A" }).clicked() {
+                if tbtn(ui, tr(6.0, 64.0), if st.ab_cur == 0 { "A → B" } else { "B → A" }, false, "Copy the current setting to the other slot").clicked() {
                     st.ab[1 - st.ab_cur] = Some(snapshot(p));
                 }
-                painter.text(Pos2::new(cx + 60.0, tb.center().y), Align2::LEFT_CENTER, "DYNAMIC EQUALIZER", mono(9.5), Color32::from_rgb(110, 116, 128));
-                if lbtn(ui, Rect::from_min_size(Pos2::new(tb.right() - 142.0, tb.top() + 4.0), Vec2::new(62.0, 20.0)), "BYPASS", byp, "Bypass the whole plugin").clicked() {
+                let br = Rect::from_min_size(Pos2::new(tb.right() - 166.0, tb.top() + 5.0), Vec2::new(86.0, 24.0));
+                if tbtn(ui, br, "      Bypass", byp, "Bypass the whole plugin").clicked() {
                     set_b(setter, &p.bypass, !byp);
                 }
-                let rl = if rng > set_rng { format!("{:.0} dB*", rng) } else { format!("{:.0} dB", rng) };
-                let drr = Rect::from_min_size(Pos2::new(tb.right() - 72.0, tb.top() + 4.0), Vec2::new(60.0, 20.0));
-                painter.rect_stroke(drr, CornerRadius::same(4), Stroke::new(1.0_f32, Color32::from_rgb(70, 74, 84)), StrokeKind::Inside);
-                if lbtn(ui, drr, &rl, false, "Display range: click to cycle 3 / 6 / 12 / 30 dB (* = widened automatically to fit the curve).").clicked() {
+                power_icon(&painter, Rect::from_center_size(Pos2::new(br.left() + 16.0, br.center().y), Vec2::new(16.0, 16.0)), if byp { Color32::BLACK } else { C_TXT });
+                let rl = if rng > set_rng { format!("{:.0} dB ⁺", rng) } else { format!("{:.0} dB", rng) };
+                let drr = Rect::from_min_size(Pos2::new(tb.right() - 72.0, tb.top() + 5.0), Vec2::new(60.0, 24.0));
+                if tbtn(ui, drr, &rl, false, "Display range: click to cycle 3 / 6 / 12 / 30 dB (⁺ = widened automatically to fit the curve)").clicked() {
                     let next = match p.disp.value() {
                         DispRange::D3 => DispRange::D6,
                         DispRange::D6 => DispRange::D12,
@@ -1564,27 +1654,27 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     set_e(setter, &p.disp, next);
                 }
 
-                // ---------------- output meter column (right)
+                // ---------------- output meter column (right): two thin bars, scale, peak readout
                 let mc = rect(BASE_W - METER_W, 0.0, METER_W, BAR_Y);
-                painter.rect_filled(mc, CornerRadius::ZERO, Color32::from_rgb(10, 11, 14));
-                painter.vline(mc.left(), mc.top()..=mc.bottom(), Stroke::new(1.0_f32, Color32::from_rgb(28, 30, 36)));
-                let mt = |db: f32| mc.top() + 36.0 + (mc.height() - 52.0) * ((3.0 - db) / 63.0).clamp(0.0, 1.0);
+                painter.rect_filled(mc, CornerRadius::ZERO, C_BG);
+                painter.vline(mc.left(), mc.top()..=mc.bottom(), Stroke::new(1.0_f32, C_BORDER));
+                let mt = |db: f32| mc.top() + 44.0 + (mc.height() - 60.0) * ((3.0 - db) / 63.0).clamp(0.0, 1.0);
                 for c in 0..2 {
-                    let x = mc.left() + 10.0 + c as f32 * 10.0;
-                    let bar = Rect::from_min_max(Pos2::new(x, mt(3.0)), Pos2::new(x + 7.0, mt(-60.0)));
-                    painter.rect_filled(bar, CornerRadius::same(1), Color32::from_rgb(20, 22, 27));
+                    let x = mc.left() + 9.0 + c as f32 * 7.0;
+                    let bar = Rect::from_min_max(Pos2::new(x, mt(3.0)), Pos2::new(x + 4.0, mt(-60.0)));
+                    painter.rect_filled(bar, CornerRadius::same(2), C_BTN);
                     let v = st.out_pk[c].max(-60.0);
                     if v > -60.0 {
-                        let top = mt(v);
-                        let fill = Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + 7.0, bar.bottom()));
-                        grad(&painter, fill, if v > 0.0 { Color32::from_rgb(240, 90, 80) } else if v > -6.0 { Color32::from_rgb(240, 200, 90) } else { Color32::from_rgb(130, 220, 150) }, Color32::from_rgb(40, 110, 80));
+                        let fill = Rect::from_min_max(Pos2::new(x, mt(v)), Pos2::new(x + 4.0, bar.bottom()));
+                        let top = if v > 0.0 { Color32::from_rgb(240, 96, 86) } else if v > -6.0 { Color32::from_rgb(236, 196, 96) } else { Color32::from_rgb(120, 214, 160) };
+                        grad(&painter, fill, top, Color32::from_rgb(52, 120, 96));
                     }
                 }
                 for db in [0.0f32, -6.0, -12.0, -24.0, -36.0, -48.0] {
-                    painter.text(Pos2::new(mc.right() - 4.0, mt(db)), Align2::RIGHT_CENTER, format!("{:.0}", db.abs()), mono(7.5), Color32::from_rgb(90, 96, 108));
+                    painter.text(Pos2::new(mc.right() - 5.0, mt(db)), Align2::RIGHT_CENTER, format!("{:.0}", db.abs()), mono(8.0), C_TXT2);
                 }
                 let pk = st.out_pk[0].max(st.out_pk[1]).max(-90.0);
-                painter.text(Pos2::new(mc.center().x, mc.top() + 16.0), Align2::CENTER_CENTER, if pk > -89.0 { format!("{:.1}", pk) } else { "-inf".into() }, mono(9.0), if pk > 0.0 { Color32::from_rgb(240, 90, 80) } else { MID });
+                painter.text(Pos2::new(mc.center().x, mc.top() + 17.0), Align2::CENTER_CENTER, if pk > -89.0 { format!("{:.1}", pk) } else { "–∞".into() }, mono(9.5), if pk > 0.0 { Color32::from_rgb(240, 96, 86) } else { C_TXT2 });
 
                 // ---------------- band panel (floats under the selected band)
                 if let (Some(i), Some(pr)) = (st.focus, panel_rect) {
@@ -1938,7 +2028,9 @@ fn param_display(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, s
     }
 }
 
-/// The band controls panel, floating under the selected band.
+/// The band controls panel, floating under the selected band. 8 px grid:
+/// | power  shape / slope      FREQ   GAIN(+dynamics ring)   Q     placement  ×   |
+/// | ◀ BAND n ▶                                                 split  »  solo      |
 #[allow(clippy::too_many_arguments)]
 fn band_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: &mut Gui, views: &[BandView], i: usize, pr: Rect, painter: &egui::Painter) {
     let b = &p.bands[i];
@@ -1948,156 +2040,161 @@ fn band_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
     let _ = ui.interact(pr, egui::Id::new("band_panel_bg"), Sense::click_and_drag());
     glass(painter, pr, Some(col));
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(Pos2::new(pr.left() + x, pr.top() + y), Vec2::new(w, h));
-    // top left: bypass, top right: delete
+    // left column
     let on = b.on.value();
-    if tbtn(ui, at(8.0, 8.0, 22.0, 20.0), "", on, "Band on / off").clicked() {
+    if ibtn(ui, at(16.0, 16.0, 24.0, 24.0), on, "Band on / off (Alt-click the dot)", |pt, c, k| power_icon(pt, Rect::from_center_size(c, Vec2::splat(16.0)), k)).clicked() {
         set_b(setter, &b.on, !on);
     }
-    power_icon(painter, at(8.0, 8.0, 22.0, 20.0), if on { Color32::BLACK } else { WHITE });
-    if tbtn(ui, at(490.0, 8.0, 22.0, 20.0), "x", false, "Delete the band").clicked() {
-        delete_band(setter, b);
-        st.focus = None;
-        st.sel[i] = false;
-        return;
-    }
-    // shape and slope
     let shape_items: Vec<(Shape, &str)> = Shape::ALL.iter().map(|s| (*s, s.short())).collect();
-    let sr = at(36.0, 8.0, 96.0, 30.0);
+    let sr = at(48.0, 16.0, 120.0, 24.0);
     menu_btn(ui, setter, &b.shape, sr, "", &shape_items, "Shape");
-    shape_icon(painter, Rect::from_min_size(sr.min + Vec2::new(6.0, 6.0), Vec2::new(26.0, 18.0)), bv.spec.shape, col);
-    painter.text(Pos2::new(sr.left() + 36.0, sr.center().y), Align2::LEFT_CENTER, bv.spec.shape.short(), mono(9.5), WHITE);
+    shape_icon(painter, Rect::from_min_size(sr.min + Vec2::new(8.0, 5.0), Vec2::new(22.0, 14.0)), bv.spec.shape, col);
+    painter.text(Pos2::new(sr.left() + 36.0, sr.center().y), Align2::LEFT_CENTER, bv.spec.shape.short(), mono(10.5), C_TXT);
     if bv.spec.shape.has_slope() {
         let items: Vec<(Slope, String)> = Slope::ALL.iter().filter(|s| s.for_shape(bv.spec.shape) == **s).map(|s| (*s, if *s == Slope::Brick { "Brickwall".to_string() } else { format!("{} dB/oct", s.label()) })).collect();
         let si: Vec<(Slope, &str)> = items.iter().map(|(s, n)| (*s, n.as_str())).collect();
-        let lab = if bv.spec.slope == Slope::Brick { "BRICKWALL".to_string() } else { format!("{} dB/oct", bv.spec.slope.label()) };
-        menu_btn(ui, setter, &b.slope, at(36.0, 44.0, 96.0, 24.0), &lab, &si, "Slope");
+        let lab = if bv.spec.slope == Slope::Brick { "Brickwall".to_string() } else { format!("{} dB/oct", bv.spec.slope.label()) };
+        menu_btn(ui, setter, &b.slope, at(48.0, 48.0, 120.0, 24.0), &lab, &si, "Slope");
     }
-    // band navigation
     let mut used: Vec<usize> = (0..NB).filter(|&k| views[k].used).collect();
     used.sort_by(|&a, &c| views[a].spec.freq.total_cmp(&views[c].spec.freq));
     let pos_in = used.iter().position(|&k| k == i).unwrap_or(0);
-    if tbtn(ui, at(8.0, 76.0, 22.0, 20.0), "◀", false, "Previous band").clicked() {
+    if tbtn(ui, at(16.0, 84.0, 24.0, 22.0), "‹", false, "Previous band").clicked() {
         let k = used[(pos_in + used.len() - 1) % used.len()];
         st.focus = Some(k);
         st.sel = [false; NB];
         st.sel[k] = true;
     }
-    painter.text(at(30.0, 76.0, 76.0, 20.0).center(), Align2::CENTER_CENTER, format!("BAND {}", i + 1), mono(10.0), col);
-    if tbtn(ui, at(108.0, 76.0, 22.0, 20.0), "▶", false, "Next band").clicked() {
+    painter.circle_filled(pr.left_top() + Vec2::new(62.0, 95.0), 4.0, col);
+    painter.text(pr.left_top() + Vec2::new(72.0, 95.0), Align2::LEFT_CENTER, format!("Band {}", i + 1), mono(10.5), C_TXT);
+    if tbtn(ui, at(144.0, 84.0, 24.0, 22.0), "›", false, "Next band").clicked() {
         let k = used[(pos_in + 1) % used.len()];
         st.focus = Some(k);
         st.sel = [false; NB];
         st.sel[k] = true;
     }
-    // knobs
-    let cell = |x: f32, w: f32| Rect::from_min_size(Pos2::new(pr.left() + x, pr.top() + 6.0), Vec2::new(w, 96.0));
-    fknob(ui, setter, &b.freq, "FREQ", cell(140.0, 76.0), "Frequency, 10 Hz to 30 kHz.", false, 24.0, col);
+    // knobs, evenly spaced
+    let cell = |cx: f32, r: f32| Rect::from_min_size(Pos2::new(pr.left() + cx - 40.0, pr.top() + 60.0 - r - 4.0 - 6.0), Vec2::new(80.0, 2.0 * r + 30.0));
+    fknob(ui, setter, &b.freq, "FREQ", cell(222.0, 26.0), "Frequency, 10 Hz to 30 kHz (double-click the dot to type it)", false, 26.0, col);
     if has_gain {
-        gain_knob(ui, setter, b, cell(218.0, 92.0), 28.0, col, bv.dyn_now, p.gain_scale.value() / 100.0);
-        // around the ring: bypass dynamics (top left), spectral (top right)
+        gain_knob(ui, setter, b, cell(312.0, 30.0), 30.0, col, bv.dyn_now, p.gain_scale.value() / 100.0);
         if bv.dynamic {
             let don = b.dyn_on.value();
-            if tbtn(ui, at(218.0, 4.0, 20.0, 16.0), "", don, "Dynamics on / off (the range is kept)").clicked() {
+            if ibtn(ui, at(266.0, 10.0, 20.0, 18.0), don, "Dynamics on / off (the range is kept)", |pt, c, k| power_icon(pt, Rect::from_center_size(c, Vec2::splat(13.0)), k)).clicked() {
                 set_b(setter, &b.dyn_on, !don);
             }
-            power_icon(painter, at(218.0, 4.0, 20.0, 16.0), if don { Color32::BLACK } else { C_DYN });
             let spc = b.spectral.value();
-            if tbtn(ui, at(290.0, 4.0, 20.0, 16.0), "S", spc, "Spectral dynamics").clicked() {
+            if tbtn(ui, at(338.0, 10.0, 20.0, 18.0), "S", spc, "Spectral dynamics").clicked() {
                 set_b(setter, &b.spectral, !spc);
             }
         }
         if bv.spec.shape == Shape::Bell {
             let gq = b.gq.value();
-            if tbtn(ui, at(312.0, 40.0, 22.0, 16.0), "GQ", gq, "Gain-Q interaction: the bell narrows as the gain grows.").clicked() {
+            if tbtn(ui, at(352.0, 90.0, 28.0, 18.0), "GQ", gq, "Gain-Q interaction: the bell narrows as the gain grows").clicked() {
                 set_b(setter, &b.gq, !gq);
             }
         }
+    } else {
+        caption(painter, pr.left_top() + Vec2::new(312.0, 60.0), Align2::CENTER_CENTER, "NO GAIN");
     }
     if bv.spec.shape.has_q() {
-        fknob(ui, setter, &b.q, "Q", cell(334.0, 76.0), "Q: bandwidth / resonance.", false, 24.0, col);
+        fknob(ui, setter, &b.q, "Q", cell(406.0, 26.0), "Q: bandwidth / resonance (wheel over the dot)", false, 26.0, col);
     }
-    // placement, split, dynamics
+    // right column
     let pl_items = [(Place::Stereo, "Stereo"), (Place::Left, "Left"), (Place::Right, "Right"), (Place::Mid, "Mid"), (Place::Side, "Side")];
-    menu_btn(ui, setter, &b.place, at(414.0, 34.0, 98.0, 22.0), &format!("{:?}", bv.place).to_uppercase(), &pl_items, "Stereo placement");
-    let spr = at(414.0, 60.0, 47.0, 20.0);
-    let sresp = tbtn(ui, spr, "SPLIT", false, "Split into left / right or mid / side copies");
+    menu_btn(ui, setter, &b.place, at(432.0, 16.0, 88.0, 24.0), &format!("{:?}", bv.place), &pl_items, "Stereo placement");
+    let spr = at(432.0, 48.0, 40.0, 24.0);
+    let sresp = ibtn(ui, spr, false, "Split into left / right or mid / side copies", icon_split);
     let sid = ui.make_persistent_id(("split", i));
     if sresp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(sid));
     }
     egui::popup_below_widget(ui, sid, &sresp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
         ui.set_min_width(130.0);
-        if ui.button(egui::RichText::new("Left / Right").font(mono(11.5))).clicked() {
+        if ui.button(egui::RichText::new("Split Left / Right").font(mono(11.5))).clicked() {
             split_band(setter, p, i, false);
         }
-        if ui.button(egui::RichText::new("Mid / Side").font(mono(11.5))).clicked() {
+        if ui.button(egui::RichText::new("Split Mid / Side").font(mono(11.5))).clicked() {
             split_band(setter, p, i, true);
         }
     });
-    if has_gain && tbtn(ui, at(465.0, 60.0, 47.0, 20.0), if st.dyn_open { "«" } else { "»" }, st.dyn_open, "Dynamics panel: threshold, attack, release, trigger, spectral density").clicked() {
+    if has_gain && tbtn(ui, at(480.0, 48.0, 40.0, 24.0), if st.dyn_open { "«" } else { "»" }, st.dyn_open, "Dynamics panel: threshold, attack, release, trigger, spectral").clicked() {
         st.dyn_open = !st.dyn_open;
     }
-    let ears = at(414.0, 84.0, 98.0, 16.0);
+    let ears = at(432.0, 84.0, 88.0, 22.0);
     let solo_on = sh.solo.load(Ordering::Relaxed) == i as i32;
-    let ear = tbtn(ui, ears, "     SOLO", solo_on, "Hold to hear what this band works on.");
-    headphones(painter, Pos2::new(ears.left() + 30.0, ears.center().y), if solo_on { Color32::BLACK } else { WHITE });
+    let ear = tbtn(ui, ears, "     Solo", solo_on, "Hold to hear what this band works on (or hold the headphones next to the dot and drag)");
+    headphones(painter, Pos2::new(ears.left() + 22.0, ears.center().y), if solo_on { Color32::BLACK } else { C_TXT });
     if ear.is_pointer_button_down_on() {
         sh.solo.store(i as i32, Ordering::Relaxed);
     } else if solo_on && st.solo_drag.is_none() && !ui.input(|inp| inp.pointer.primary_down()) {
         sh.solo.store(-1, Ordering::Relaxed);
     }
-    // dynamics panel
+    // close (top right corner)
+    let cr = Rect::from_min_size(Pos2::new(pr.right() - 26.0, pr.top() + 6.0), Vec2::new(20.0, 20.0));
+    let crr = ui.allocate_rect(cr, Sense::click()).on_hover_text("Delete the band");
+    if crr.hovered() {
+        painter.rect_filled(cr, CornerRadius::same(5), C_BTN_H);
+    }
+    icon_close(painter, cr.center(), if crr.hovered() { C_TXT } else { C_TXT2 });
+    if crr.clicked() {
+        delete_band(setter, b);
+        st.focus = None;
+        st.sel[i] = false;
+        return;
+    }
+    // dynamics section
     if st.dyn_open && has_gain {
-        let x0 = 524.0;
-        painter.vline(pr.left() + x0 - 6.0, pr.top() + 10.0..=pr.bottom() - 10.0, Stroke::new(1.0_f32, LINE));
+        let x0 = 560.0;
+        painter.vline(pr.left() + x0 - 8.0, pr.top() + 14.0..=pr.bottom() - 14.0, Stroke::new(1.0_f32, C_BORDER));
         let lvl = Shared::get(&sh.lvl_db[i]);
         let thr_now = Shared::get(&sh.thr_db[i]);
-        painter.text(at(x0, 4.0, 30.0, 10.0).center(), Align2::CENTER_CENTER, "THR", mono(8.0), DIM);
-        thr_slider(ui, setter, b, at(x0 + 4.0, 14.0, 20.0, 74.0), lvl, thr_now);
+        caption(painter, pr.left_top() + Vec2::new(x0 + 16.0, 12.0), Align2::CENTER_CENTER, "THRESH");
+        thr_slider(ui, setter, b, at(x0 + 6.0, 22.0, 20.0, 76.0), lvl, thr_now);
         let auto = b.thr_auto.value();
-        if tbtn(ui, at(x0 + 28.0, 14.0, 18.0, 16.0), "A", auto, "Automatic threshold").clicked() {
+        if tbtn(ui, at(x0 + 30.0, 22.0, 22.0, 20.0), "A", auto, "Automatic threshold").clicked() {
             set_b(setter, &b.thr_auto, !auto);
         }
         let ext = b.sc_ext.value();
-        if tbtn(ui, at(x0 + 28.0, 34.0, 18.0, 16.0), "E", ext, "External side chain triggers the band").clicked() {
+        if tbtn(ui, at(x0 + 30.0, 46.0, 22.0, 20.0), "E", ext, "External side chain triggers the band").clicked() {
             set_b(setter, &b.sc_ext, !ext);
         }
-        let small = |x: f32| Rect::from_min_size(Pos2::new(pr.left() + x, pr.top() + 8.0), Vec2::new(58.0, 92.0));
-        fknob(ui, setter, &b.attack, "ATTACK", small(x0 + 50.0), "Attack (50 % = auto)", true, 15.0, C_DYN);
-        fknob(ui, setter, &b.release, "RELEASE", small(x0 + 108.0), "Release (50 % = auto)", true, 15.0, C_DYN);
-        let tx = x0 + 172.0;
+        let small = |cx: f32| Rect::from_min_size(Pos2::new(pr.left() + cx - 30.0, pr.top() + 22.0), Vec2::new(60.0, 60.0));
+        fknob(ui, setter, &b.attack, "ATTACK", small(x0 + 88.0), "Attack (50 % = auto)", true, 18.0, C_DYN);
+        fknob(ui, setter, &b.release, "RELEASE", small(x0 + 140.0), "Release (50 % = auto)", true, 18.0, C_DYN);
+        let tx = x0 + 176.0;
         let free = b.sc_free.value();
-        if tbtn(ui, at(tx, 8.0, 76.0, 20.0), if free { "TRIG: FREE" } else { "TRIG: BAND" }, free, "Trigger: the band's own range, or your own low / high cut").clicked() {
+        if tbtn(ui, at(tx, 16.0, 84.0, 22.0), if free { "Trigger: Free" } else { "Trigger: Band" }, free, "Trigger: the band's own range, or your own low / high cut").clicked() {
             set_b(setter, &b.sc_free, !free);
         }
-        let aud = tbtn(ui, at(tx, 32.0, 76.0, 20.0), "AUDITION", false, "Hold to hear the trigger signal");
+        let aud = tbtn(ui, at(tx, 44.0, 84.0, 22.0), "Audition", false, "Hold to hear the trigger signal");
         if aud.is_pointer_button_down_on() {
             sh.solo.store(i as i32, Ordering::Relaxed);
         }
-        if tbtn(ui, at(tx, 56.0, 76.0, 20.0), "CLEAR", false, "Clear the dynamics").clicked() {
+        let spc = b.spectral.value();
+        if tbtn(ui, at(tx, 72.0, 84.0, 22.0), "Spectral", spc, "Spectral dynamics").clicked() {
+            set_b(setter, &b.spectral, !spc);
+        }
+        if tbtn(ui, at(tx, 98.0, 84.0, 16.0), "Clear", false, "Clear the dynamics").clicked() {
             set_f(setter, &b.dyn_range, 0.0);
             set_b(setter, &b.spectral, false);
         }
-        let spc = b.spectral.value();
-        if tbtn(ui, at(tx, 80.0, 76.0, 18.0), "SPECTRAL", spc, "Spectral dynamics").clicked() {
-            set_b(setter, &b.spectral, !spc);
-        }
-        let mut kx = tx + 84.0;
+        let mut kx = tx + 126.0;
         if spc {
-            fknob(ui, setter, &b.density, "DENSITY", small(kx), "Spectral density", false, 14.0, C_DYN);
+            fknob(ui, setter, &b.density, "DENSITY", small(kx), "Spectral density", false, 17.0, C_DYN);
             let tl = b.sp_tilt.value();
-            if tbtn(ui, at(kx + 40.0, 4.0, 22.0, 14.0), "3dB", tl, "Spectral tilt: +3 dB/oct on the trigger").clicked() {
+            if tbtn(ui, at(kx - 22.0, 92.0, 44.0, 18.0), "Tilt", tl, "Spectral tilt: +3 dB/oct on the trigger").clicked() {
                 set_b(setter, &b.sp_tilt, !tl);
             }
-            kx += 62.0;
+            kx += 56.0;
         }
         if free {
-            fknob(ui, setter, &b.sc_lo, "LO CUT", small(kx), "Trigger low cut", false, 14.0, C_DYN);
-            fknob(ui, setter, &b.sc_hi, "HI CUT", small(kx + 58.0), "Trigger high cut", false, 14.0, C_DYN);
+            fknob(ui, setter, &b.sc_lo, "LO CUT", small(kx), "Trigger low cut", false, 17.0, C_DYN);
+            fknob(ui, setter, &b.sc_hi, "HI CUT", small(kx + 54.0), "Trigger high cut", false, 17.0, C_DYN);
         }
     }
     if sh.dyn_blocked.load(Ordering::Relaxed) && bv.dynamic {
-        painter.text(Pos2::new(pr.center().x, pr.top() - 9.0), Align2::CENTER_CENTER, "dynamics off: Linear Phase above High resolution", mono(9.5), C_DYN);
+        painter.text(Pos2::new(pr.center().x, pr.top() - 10.0), Align2::CENTER_CENTER, "dynamics off: Linear Phase above High resolution", mono(9.5), C_DYN);
     }
 }
 
@@ -2191,23 +2288,46 @@ fn analyzer_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, st: &mut Gui,
     painter.text(Pos2::new(ar.left() + 364.0, ar.top() + 187.0), Align2::LEFT_CENTER, format!("{:.0} s", st.m_cnt as f32 * 0.03), mono(9.5), if ready { WHITE } else { DIM });
 }
 
-/// bottom bar: one thin line of text controls
+/// bottom bar item: dim caption + bright value, the whole thing is the button
+fn bar_item(ui: &mut Ui, painter: &egui::Painter, x: f32, y: f32, cap: &str, val: &str, on: bool, tip: &str) -> (egui::Response, f32) {
+    let cw = if cap.is_empty() { 0.0 } else { ui.fonts(|f| f.layout_no_wrap(cap.to_string(), mono(8.5), WHITE).size().x) + 6.0 };
+    let vw = ui.fonts(|f| f.layout_no_wrap(val.to_string(), mono(11.0), WHITE).size().x);
+    let r = Rect::from_min_size(Pos2::new(x, y + 4.0), Vec2::new(cw + vw + 16.0, 24.0));
+    let resp = ui.allocate_rect(r, Sense::click_and_drag());
+    let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
+    if resp.hovered() || resp.dragged() {
+        painter.rect_filled(r, CornerRadius::same(6), C_BTN);
+    }
+    if cw > 0.0 {
+        painter.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, cap, mono(8.5), C_TXT2);
+    }
+    painter.text(Pos2::new(r.left() + 8.0 + cw, r.center().y), Align2::LEFT_CENTER, val, mono(11.0), if on { C_TXT } else { C_TXT2 });
+    (resp, r.right())
+}
+
+/// bottom bar: sketch · piano | processing · resolution · latency | character | analyzer |
+/// phase · auto gain · scale · output · pan
 #[allow(clippy::too_many_arguments)]
 fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: &mut Gui, o: Pos2, painter: &egui::Painter, fs: f32, ana_btn: Rect) {
-    let rect = |x: f32, w: f32| Rect::from_min_size(Pos2::new(o.x + x, o.y + BAR_Y + 2.0), Vec2::new(w, 22.0));
-    let bar = Rect::from_min_size(Pos2::new(o.x, o.y + BAR_Y), Vec2::new(BASE_W, BASE_H - BAR_Y));
-    painter.rect_filled(bar, CornerRadius::ZERO, Color32::from_rgb(12, 13, 16));
-    painter.hline(bar.left()..=bar.right(), bar.top(), Stroke::new(1.0_f32, Color32::from_rgb(30, 32, 38)));
-    let sep = |x: f32| painter.vline(o.x + x, o.y + BAR_Y + 7.0..=o.y + BAR_Y + 19.0, Stroke::new(1.0_f32, Color32::from_rgb(40, 43, 50)));
+    let y = o.y + BAR_Y;
+    let bar = Rect::from_min_size(Pos2::new(o.x, y), Vec2::new(BASE_W, BASE_H - BAR_Y));
+    painter.rect_filled(bar, CornerRadius::ZERO, C_BG);
+    painter.hline(bar.left()..=bar.right(), bar.top(), Stroke::new(1.0_f32, C_BORDER));
+    let sep = |x: f32| painter.vline(x + 6.0, y + 10.0..=y + 22.0, Stroke::new(1.0_f32, C_BORDER));
     let piano = p.piano.value();
-    if lbtn(ui, rect(8.0, 60.0), "Sketch", st.sketch_on, "EQ Sketch: draw a curve, bands are made to follow it.").clicked() {
+    let mut x = o.x + 8.0;
+    let (r, nx) = bar_item(ui, painter, x, y, "", "Sketch", st.sketch_on, "EQ Sketch: draw a curve, bands are made to follow it");
+    if r.clicked() {
         st.sketch_on = !st.sketch_on;
         st.sketch.clear();
     }
-    if lbtn(ui, rect(70.0, 52.0), "Piano", piano, "Piano display: notes on the frequency axis, frequencies snap to notes.").clicked() {
+    x = nx + 2.0;
+    let (r, nx) = bar_item(ui, painter, x, y, "", "Piano", piano, "Piano display: notes on the frequency axis, frequencies snap to notes");
+    if r.clicked() {
         set_b(setter, &p.piano, !piano);
     }
-    sep(130.0);
+    sep(nx);
+    x = nx + 14.0;
     let mode = p.pmode.value();
     let res_name = |r: Res| match r {
         Res::Low => "Low",
@@ -2217,29 +2337,27 @@ fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
         Res::Max => "Maximum",
     };
     let warn = sh.dyn_blocked.load(Ordering::Relaxed);
-    let ml = format!("{}{}", match mode {
+    let ml = format!("{}{} ▾", match mode {
         PMode::Zero => "Zero Latency",
         PMode::Natural => "Natural Phase",
         PMode::Linear => "Linear Phase",
     }, if warn { " ⚠" } else { "" });
-    let mr = rect(138.0, 120.0);
-    let mresp = lbtn(ui, mr, &ml, true, "Processing mode. Zero Latency: analog-matched, no delay. Natural Phase: analog magnitude and phase, ~8 ms. Linear Phase: no phase shift, latency from the resolution.");
+    let (mresp, nx) = bar_item(ui, painter, x, y, "PHASE", &ml, true, "Processing mode. Zero Latency: analog-matched, no delay. Natural Phase: analog magnitude and phase, ~8 ms. Linear Phase: no phase shift, latency from the resolution.");
     let pid = ui.make_persistent_id("pmode_pop");
     if mresp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(pid));
     }
     egui::popup_above_or_below_widget(ui, pid, &mresp, egui::AboveOrBelow::Above, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-        ui.set_min_width(210.0);
-        let t = |s: &str| egui::RichText::new(s.to_string()).font(mono(11.5));
+        ui.set_min_width(200.0);
         for (m, name) in [(PMode::Zero, "Zero Latency"), (PMode::Natural, "Natural Phase"), (PMode::Linear, "Linear Phase")] {
-            if ui.selectable_label(mode == m, t(name)).clicked() {
+            if ui.selectable_label(mode == m, egui::RichText::new(name).font(mono(11.5))).clicked() {
                 set_e(setter, &p.pmode, m);
             }
         }
     });
+    x = nx + 2.0;
     if mode == PMode::Linear {
-        let rr = rect(262.0, 76.0);
-        let rresp = lbtn(ui, rr, res_name(p.res.value()), true, "Linear phase resolution (and its latency). Dynamic bands work up to High.");
+        let (rresp, nx) = bar_item(ui, painter, x, y, "RES", &format!("{} ▾", res_name(p.res.value())), true, "Linear phase resolution (and its latency). Dynamic bands work up to High.");
         let rid = ui.make_persistent_id("res_pop");
         if rresp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(rid));
@@ -2253,17 +2371,20 @@ fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
                 }
             }
         });
+        x = nx + 2.0;
     }
     let lat = sh.latency.load(Ordering::Relaxed);
-    painter.text(Pos2::new(o.x + 346.0, o.y + BAR_Y + 13.0), Align2::LEFT_CENTER, format!("{:.1} ms", lat as f32 / fs * 1000.0), mono(9.0), Color32::from_rgb(100, 106, 118));
-    sep(404.0);
+    painter.text(Pos2::new(x + 6.0, y + 16.0), Align2::LEFT_CENTER, format!("{:.1} ms", lat as f32 / fs * 1000.0), mono(9.5), C_TXT2);
+    x += 58.0;
+    sep(x);
+    x += 14.0;
     let ch = p.character.value();
     let chl = match ch {
-        Character::Clean => "Clean",
-        Character::Subtle => "Subtle",
-        Character::Warm => "Warm",
+        Character::Clean => "Clean ▾",
+        Character::Subtle => "Subtle ▾",
+        Character::Warm => "Warm ▾",
     };
-    let cresp = lbtn(ui, rect(412.0, 70.0), chl, ch != Character::Clean, "Character: Clean, Subtle or Warm (analog-style saturation)");
+    let (cresp, nx) = bar_item(ui, painter, x, y, "CHARACTER", chl, true, "Character: Clean, Subtle or Warm (analog-style saturation)");
     let cid = ui.make_persistent_id("char_pop");
     if cresp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(cid));
@@ -2276,7 +2397,9 @@ fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
             }
         }
     });
-    sep(590.0);
+    sep(nx);
+    let _ = x;
+    // analyzer (fixed slot: the pop-up is anchored to it)
     let mut v = vec![];
     if p.an_pre.value() {
         v.push("Pre");
@@ -2287,26 +2410,14 @@ fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
     if p.an_sc.value() {
         v.push("SC");
     }
-    let alab = format!("Analyzer: {}{}", if v.is_empty() { "Off".to_string() } else { v.join("+") }, if p.an_freeze.value() { " ❄" } else { "" });
-    if lbtn(ui, ana_btn, &alab, st.pop == Pop::Analyzer, "Analyzer (hover for settings, click to keep them open)").clicked() {
+    let alab = format!("{}{}", if v.is_empty() { "Off".to_string() } else { v.join(" + ") }, if p.an_freeze.value() { " · frozen" } else { "" });
+    let (ar, _) = bar_item(ui, painter, ana_btn.left(), y, "ANALYZER", &alab, true, "Analyzer (hover for settings, click to keep them open)");
+    if ar.clicked() {
         st.pop = if st.pop == Pop::Analyzer { Pop::None } else { Pop::Analyzer };
     }
-    sep(780.0);
-    // output: phase, auto gain, gain scale, output gain, pan (drag the numbers)
-    let ph = p.phase.value();
-    if lbtn(ui, rect(788.0, 24.0), "Ø", ph, "Phase invert").clicked() {
-        set_b(setter, &p.phase, !ph);
-    }
-    let ag = p.auto_gain.value();
-    if lbtn(ui, rect(814.0, 24.0), "A", ag, "Auto gain").clicked() {
-        set_b(setter, &p.auto_gain, !ag);
-    }
-    let drag_num = |ui: &mut Ui, r: Rect, prm: &FloatParam, txt: String, tip: &str, step: f32| {
-        let resp = ui.interact(r, egui::Id::new(("barnum", prm.name())), Sense::click_and_drag()).on_hover_text(tip);
-        if resp.hovered() || resp.dragged() {
-            painter.rect_filled(r, CornerRadius::same(4), Color32::from_white_alpha(14));
-        }
-        painter.text(r.center(), Align2::CENTER_CENTER, txt, mono(10.5), WHITE);
+    // output (right aligned)
+    let drag_num = |ui: &mut Ui, x: f32, cap: &str, prm: &FloatParam, txt: String, tip: &str, step: f32| -> f32 {
+        let (resp, nx) = bar_item(ui, painter, x, y, cap, &txt, true, tip);
         if resp.drag_started() {
             setter.begin_set_parameter(prm);
         }
@@ -2326,9 +2437,24 @@ fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
                 set_f(setter, prm, prm.value() + w / 30.0 * step * 4.0);
             }
         }
+        nx
     };
-    drag_num(ui, rect(842.0, 52.0), &p.gain_scale, format!("{:.0}%", p.gain_scale.value()), "Gain scale: drag up / down (double-click: 100 %)", 1.0);
-    drag_num(ui, rect(896.0, 70.0), &p.out, format!("{:+.1} dB", p.out.value()), "Output gain: drag up / down (double-click: 0 dB)", 0.1);
+    let mut x = o.x + BASE_W - 340.0;
+    sep(x - 14.0);
+    let ph = p.phase.value();
+    let (r, nx) = bar_item(ui, painter, x, y, "", "Ø", ph, "Phase invert");
+    if r.clicked() {
+        set_b(setter, &p.phase, !ph);
+    }
+    x = nx;
+    let ag = p.auto_gain.value();
+    let (r, nx) = bar_item(ui, painter, x, y, "AUTO", if ag { "On" } else { "Off" }, ag, "Auto gain: keeps the level about the same whatever the curve does");
+    if r.clicked() {
+        set_b(setter, &p.auto_gain, !ag);
+    }
+    x = nx;
+    x = drag_num(ui, x, "SCALE", &p.gain_scale, format!("{:.0}%", p.gain_scale.value()), "Gain scale: drag up / down, double-click: 100 %", 1.0);
+    x = drag_num(ui, x, "OUT", &p.out, format!("{:+.1} dB", p.out.value()), "Output gain: drag up / down, double-click: 0 dB", 0.1);
     let pan = p.pan.value();
-    drag_num(ui, rect(968.0, 46.0), &p.pan, if pan.abs() < 0.5 { "C".into() } else if pan < 0.0 { format!("L{:.0}", -pan) } else { format!("R{:.0}", pan) }, "Output pan: drag up / down (double-click: centre)", 1.0);
+    let _ = drag_num(ui, x, "PAN", &p.pan, if pan.abs() < 0.5 { "C".into() } else if pan < 0.0 { format!("L{:.0}", -pan) } else { format!("R{:.0}", pan) }, "Output pan: drag up / down, double-click: centre", 1.0);
 }

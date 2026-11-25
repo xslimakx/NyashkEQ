@@ -148,7 +148,52 @@ pub fn fmt_hz(v: f32) -> String {
     }
 }
 
+/// a note name: "A4", "C#2", "Bb3", "C-1", with optional cents "C#2+13" / "A4-20"
+pub fn parse_note(s: &str) -> Option<f32> {
+    let t: Vec<char> = s.trim().to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let base = match t.first()? {
+        'c' => 0,
+        'd' => 2,
+        'e' => 4,
+        'f' => 5,
+        'g' => 7,
+        'a' => 9,
+        'b' => 11,
+        _ => return None,
+    };
+    let mut i = 1;
+    let mut semi = base;
+    if let Some(&c) = t.get(i) {
+        if c == '#' {
+            semi += 1;
+            i += 1;
+        } else if c == 'b' && t.get(i + 1).is_some_and(|n| n.is_ascii_digit() || *n == '-') {
+            semi -= 1;
+            i += 1;
+        }
+    }
+    let neg = t.get(i) == Some(&'-') && t.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+    if neg {
+        i += 1;
+    }
+    let d0 = i;
+    while t.get(i).is_some_and(|c| c.is_ascii_digit()) {
+        i += 1;
+    }
+    if i == d0 {
+        return None;
+    }
+    let oct: i32 = t[d0..i].iter().collect::<String>().parse().ok()?;
+    let oct = if neg { -oct } else { oct };
+    let cents: f32 = if i < t.len() { t[i..].iter().collect::<String>().parse().ok()? } else { 0.0 };
+    let midi = (oct + 1) * 12 + semi;
+    Some(440.0 * 2f32.powf((midi as f32 - 69.0 + cents / 100.0) / 12.0))
+}
+
 pub fn parse_hz(s: &str) -> Option<f32> {
+    if let Some(f) = parse_note(s) {
+        return Some(f);
+    }
     let t = s.trim().to_lowercase().replace("hz", "");
     let t = t.trim();
     if let Some(k) = t.strip_suffix('k') {

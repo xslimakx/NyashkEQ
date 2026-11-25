@@ -13,6 +13,7 @@
 </div>
 
 <p align="center"><img src="docs/img/nyashkeq.png" width="720"></p>
+<p align="center"><img src="docs/img/spectrum_grab.png" width="720" alt="Spectrum grab"></p>
 
 ## Features
 
@@ -21,9 +22,9 @@
 - **Spectral dynamics**: per-frequency compression / expansion inside a band (only what sticks out is touched), with density and +3 dB/oct trigger tilt.
 - **Processing modes**: Zero Latency (analog-matched filters, no cramping), Natural Phase (adds a short correction FIR: analog magnitude *and* phase, ≈ 8 ms), Linear Phase with five resolutions (dynamics up to High).
 - **Per-band placement**: Stereo, Left, Right, Mid, Side.
-- Analyzer: pre / post / side chain, range 60 / 90 / 120 dB, resolution Low…Maximum, speed, tilt 0–6 dB/oct, freeze, **spectrum grab** (drag a peak to make a band), **collision** view, **EQ match** to the side chain.
+- Analyzer: pre / post / side chain, range 60 / 90 / 120 dB, resolution Low…Maximum, speed, tilt 0–6 dB/oct, freeze (click, or hold for a momentary freeze), **spectrum grab** (rest the mouse in the spectrum: it freezes, the main peaks get labels, drag one to make a bell; click and hold for a permanent grab), frequency / note under the mouse, **frequency zoom** (drag the scale), **collision** view, **EQ match** to the side chain.
 - **EQ Sketch** (draw the curve, bands are fitted), **piano display** (notes on the axis, frequencies snap to notes).
-- Character (Clean / Subtle / Warm, oversampled), auto gain, gain scale (−100…200 %), output gain / pan / phase, A/B, undo / redo, display range 3 / 6 / 12 / 30 dB.
+- Character (Clean / Subtle / Warm, oversampled), auto gain, gain scale (−100…200 %), output gain / pan / phase, A/B, undo / redo (Ctrl+Z / Alt+Z, Ctrl+Shift+Z / Ctrl+Y), frequencies typed as notes (A4, C#2+13), display range 3 / 6 / 12 / 30 dB.
 - Display: double-click = new band (Alt = dynamic), drag = frequency / gain (Shift = fine), wheel = Q, Alt + wheel = dynamic range, right-click = menu (shape, slope, placement, make dynamic, invert gain, reset, duplicate), double-click a dot = delete, rubber-band and Shift multi-select, Delete key.
 
 ## Install

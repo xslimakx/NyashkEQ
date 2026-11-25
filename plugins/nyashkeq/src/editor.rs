@@ -201,14 +201,17 @@ struct Disp {
     g: Rect,
     range: f32,
     an_range: f32,
+    /// visible frequency range (zoom on the frequency scale)
+    lo: f32,
+    hi: f32,
 }
 
 impl Disp {
     fn fx(&self, f: f32) -> f32 {
-        self.g.left() + self.g.width() * (f.max(1.0) / F_LO).ln() / (F_HI / F_LO).ln()
+        self.g.left() + self.g.width() * (f.max(1.0) / self.lo).ln() / (self.hi / self.lo).ln()
     }
     fn xf(&self, x: f32) -> f32 {
-        F_LO * (F_HI / F_LO).powf(((x - self.g.left()) / self.g.width()).clamp(0.0, 1.0))
+        self.lo * (self.hi / self.lo).powf(((x - self.g.left()) / self.g.width()).clamp(0.0, 1.0))
     }
     fn dy(&self, d: f32) -> f32 {
         self.g.center().y - self.g.height() * 0.44 * (d / self.range)
@@ -267,7 +270,7 @@ impl Ana {
     }
     /// polyline over the display; each point takes the loudest bin it covers
     fn points(&self, d: &Disp, fs: f32, tilt: f32, npts: usize) -> Vec<(f32, f32)> {
-        let (f_lo, f_hi) = (20.0f32, F_HI.min(fs * 0.5));
+        let (f_lo, f_hi) = (d.lo.max(10.0), d.hi.min(fs * 0.5));
         let n = self.n as f32;
         let bin = |f: f32| (f * n / fs).clamp(1.0, n / 2.0 - 1.0);
         let mut out = Vec::with_capacity(npts + 1);
@@ -278,7 +281,6 @@ impl Ana {
             let db = if b1 - b0 < 1.0 { cubic_at(&self.sm, 0.5 * (b0 + b1)) } else { (b0 as usize..=(b1 as usize).min(self.sm.len() - 1)).map(|k| self.sm[k]).fold(-200.0f32, f32::max) };
             out.push((f0, db + tilt * (f0 / 1000.0).log2()));
         }
-        let _ = d;
         if out.len() > 2 {
             let ys: Vec<f32> = out.iter().map(|q| q.1).collect();
             for i in 1..out.len() - 1 {
@@ -338,6 +340,52 @@ struct Gui {
     ab_cur: usize,
     last_snap_t: f64,
     pending_snap: bool,
+    /// frequency zoom (visible range) and the range the band caches were made for
+    zoom: (f32, f32),
+    cache_zoom: (f32, f32),
+    /// frequency-scale drag: (start, lo, hi)
+    scale_drag: Option<(Pos2, f32, f32)>,
+    /// spectrum grab: 0 off, 1 temporary (after hovering the spectrum), 2 permanent (click and hold)
+    grab: u8,
+    /// since when the mouse rests on the spectrum (-1: not)
+    grab_t: f64,
+    /// the frozen spectrum while grabbing
+    grab_pts: Option<Vec<(f32, f32)>>,
+    /// the current press must not also make / deselect a band (it switched grab mode)
+    eat_click: bool,
+    /// FREEZE held down: frozen until released; when it went down
+    freeze_hold: bool,
+    freeze_t: Option<f64>,
+}
+
+/// two snapshots are the same setting (restoring goes through normalized values: tiny rounding)
+fn same_snap(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+}
+
+/// undo one step. A change not yet recorded (made less than 0.35 s ago) is undone first.
+fn do_undo(st: &mut Gui, setter: &ParamSetter, p: &EqParams) {
+    let cur = snapshot(p);
+    if st.undo.last().is_some_and(|l| !same_snap(l, &cur)) {
+        st.redo.push(cur);
+        let prev = st.undo.last().cloned().unwrap();
+        restore(setter, p, &prev);
+    } else if st.undo.len() > 1 {
+        let cur = st.undo.pop().unwrap();
+        st.redo.push(cur);
+        if let Some(prev) = st.undo.last().cloned() {
+            restore(setter, p, &prev);
+        }
+    }
+    st.pending_snap = false;
+}
+
+fn do_redo(st: &mut Gui, setter: &ParamSetter, p: &EqParams) {
+    if let Some(sn) = st.redo.pop() {
+        restore(setter, p, &sn);
+        st.undo.push(sn);
+    }
+    st.pending_snap = false;
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -421,8 +469,42 @@ fn fit_bells(r: &mut [f32], j0: usize, j1: usize, max_bands: usize) -> Vec<(f32,
     out
 }
 
+/// Typing a value into a knob (double-click): an edit field over the value, Enter sets it,
+/// Escape or clicking elsewhere cancels. True while editing.
+fn knob_text_edit<P: Param>(ui: &mut Ui, setter: &ParamSetter, p: &P, id: egui::Id, c: Pos2, r: f32, start: bool) -> bool {
+    let tid = id.with("txt");
+    let mut text: Option<String> = ui.data(|d| d.get_temp(tid));
+    if start {
+        text = Some(p.normalized_value_to_string(p.unmodulated_normalized_value(), false));
+    }
+    let Some(mut t) = text else { return false };
+    let rect = Rect::from_center_size(c, Vec2::new((2.0 * r + 16.0).max(64.0), 20.0));
+    let resp = ui.put(rect, egui::TextEdit::singleline(&mut t).id(id.with("te")).font(mono(11.0)).horizontal_align(egui::Align::Center).text_color(WHITE));
+    if start {
+        resp.request_focus();
+        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(t.chars().count()))));
+            st.store(ui.ctx(), resp.id);
+        }
+    }
+    let enter = ui.input(|i| i.key_pressed(Key::Enter));
+    let esc = ui.input(|i| i.key_pressed(Key::Escape));
+    if resp.lost_focus() || esc {
+        if enter && !esc {
+            if let Some(v) = p.string_to_normalized_value(&t) {
+                set_norm(setter, p, v);
+            }
+        }
+        ui.data_mut(|d| d.remove::<String>(tid));
+        return false;
+    }
+    ui.data_mut(|d| d.insert_temp(tid, t));
+    true
+}
+
 /// Flat knob: a thin ring, the value as a coloured arc, the value written in the middle and the
-/// label under it. Drag up / down (Shift: fine), wheel, double-click or Ctrl-click: default.
+/// label under it. Drag up / down (Shift: fine), wheel; double-click: type a value; Ctrl-click:
+/// default.
 #[allow(clippy::too_many_arguments)]
 fn fknob<P: Param>(ui: &mut Ui, setter: &ParamSetter, p: &P, label: &str, cell: Rect, tip: &str, bipolar: bool, r: f32, accent: Color32) -> egui::Response {
     let c = Pos2::new(cell.center().x, cell.top() + r + 4.0);
@@ -440,9 +522,10 @@ fn fknob<P: Param>(ui: &mut Ui, setter: &ParamSetter, p: &P, label: &str, cell: 
     if resp.drag_stopped() {
         setter.end_set_parameter(p);
     }
-    if resp.double_clicked() || (resp.clicked() && ui.input(|i| i.modifiers.command)) {
+    if resp.clicked() && ui.input(|i| i.modifiers.command) {
         set_norm(setter, p, p.default_normalized_value());
     }
+    let editing = knob_text_edit(ui, setter, p, resp.id, c, r, resp.double_clicked());
     if resp.hovered() {
         let sc = ui.input(|i| i.smooth_scroll_delta.y);
         if sc != 0.0 {
@@ -474,7 +557,9 @@ fn fknob<P: Param>(ui: &mut Ui, setter: &ParamSetter, p: &P, label: &str, cell: 
     let size = if r >= 20.0 { 11.0 } else { 9.5 };
     let gw = ui.fonts(|f| f.layout_no_wrap(txt.clone(), mono(size), WHITE).size().x);
     let size = if gw > r * 1.7 { size * r * 1.7 / gw } else { size };
-    painter.text(c, Align2::CENTER_CENTER, txt, mono(size), WHITE);
+    if !editing {
+        painter.text(c, Align2::CENTER_CENTER, txt, mono(size), WHITE);
+    }
     painter.text(Pos2::new(c.x, c.y + r + 11.0), Align2::CENTER_CENTER, label, mono(9.0), Color32::from_rgb(130, 136, 148));
     resp
 }
@@ -846,6 +931,15 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
             m_cnt: 0,
             cache: (0..NB).map(|_| (None, Vec::with_capacity(NPTS + 1))).collect(),
             undo: Vec::new(),
+            zoom: (F_LO, F_HI),
+            cache_zoom: (F_LO, F_HI),
+            scale_drag: None,
+            grab: 0,
+            grab_t: -1.0,
+            grab_pts: None,
+            eat_click: false,
+            freeze_hold: false,
+            freeze_t: None,
             redo: Vec::new(),
             ab: [None, None],
             ab_cur: 0,
@@ -860,7 +954,10 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
             let fs = f32::from_bits(sh.fs.load(Ordering::Relaxed));
             let an_n = p.an_res.value().n();
             let fall = p.an_speed.value().fall();
-            let freeze = p.an_freeze.value();
+            if !ctx.input(|i| i.pointer.any_down()) {
+                st.freeze_hold = false;
+            }
+            let freeze = p.an_freeze.value() || st.freeze_hold;
             if p.an_pre.value() || st.learn {
                 st.pre.update(&sh.tap_pre, an_n, fall, freeze);
             }
@@ -891,7 +988,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
             if st.pending_snap && now - st.last_snap_t > 0.35 && !ctx.input(|i| i.pointer.any_down()) {
                 st.pending_snap = false;
                 let s = snapshot(p);
-                if st.undo.last() != Some(&s) {
+                if !st.undo.last().is_some_and(|l| same_snap(l, &s)) {
                     if !st.undo.is_empty() {
                         st.redo.clear();
                     }
@@ -924,7 +1021,14 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 }
                 // range: the chosen one, widened automatically when the curve goes outside it
                 let set_rng = p.disp.value().db();
-                let probe = Disp { g: gr, range: set_rng, an_range: 90.0 };
+                let (zlo, zhi) = st.zoom;
+                if st.cache_zoom != st.zoom {
+                    st.cache_zoom = st.zoom;
+                    for c in st.cache.iter_mut() {
+                        c.0 = None;
+                    }
+                }
+                let probe = Disp { g: gr, range: set_rng, an_range: 90.0, lo: zlo, hi: zhi };
                 for i in 0..NB {
                     if views[i].used {
                         let spec = views[i].spec;
@@ -971,7 +1075,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 }
                 let peak = tot_a.iter().chain(tot_b.iter()).fold(0.0f32, |m, v| m.max(v.abs().min(40.0)));
                 let rng = [3.0f32, 6.0, 12.0, 30.0].into_iter().find(|&r| r >= set_rng && r >= peak * 0.92).unwrap_or(30.0);
-                let d = Disp { g: gr, range: rng, an_range: p.an_range.value().db() };
+                let d = Disp { g: gr, range: rng, an_range: p.an_range.value().db(), lo: zlo, hi: zhi };
                 let painter = ui.painter().clone();
                 painter.rect_filled(gr, CornerRadius::ZERO, Color32::from_rgb(8, 9, 12));
                 let clip = painter.with_clip_rect(gr.shrink(1.0));
@@ -1007,6 +1111,17 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 let post_pts = if p.an_post.value() { Some(st.post.points(&d, fs, tilt, 320)) } else { None };
                 let pre_pts = if p.an_pre.value() { Some(st.pre.points(&d, fs, tilt, 320)) } else { None };
                 let sc_pts = if p.an_sc.value() { Some(st.sc.points(&d, fs, tilt, 320)) } else { None };
+                let (mut post_pts, mut pre_pts) = (post_pts, pre_pts);
+                if st.grab > 0 && st.grab_pts.is_some() && (post_pts.is_some() || pre_pts.is_some()) {
+                    if post_pts.is_some() {
+                        post_pts = st.grab_pts.clone();
+                    } else {
+                        pre_pts = st.grab_pts.clone();
+                    }
+                } else if st.grab > 0 {
+                    st.grab = 0;
+                    st.grab_pts = None;
+                }
                 if let Some(pp) = &pre_pts {
                     let pts = to_pts(pp);
                     grad_fill(&clip, &smooth_line(&pts, 2), gr.bottom(), Color32::from_rgb(120, 130, 150), 30, 2);
@@ -1032,7 +1147,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let spn = sh.sp_n.load(Ordering::Relaxed) as usize;
                     let mut pts = Vec::with_capacity(321);
                     for k in 0..=320 {
-                        let f = 20.0 * (F_HI.min(fs * 0.5) / 20.0).powf(k as f32 / 320.0);
+                        let f = d.lo * (d.hi.min(fs * 0.5) / d.lo).powf(k as f32 / 320.0);
                         let bin = ((f * spn as f32 / fs) as usize).min(spn / 2);
                         pts.push(Pos2::new(d.fx(f), d.dy(Shared::get(&sh.sp_show[bin]).clamp(-rng * 1.2, rng * 1.2))));
                     }
@@ -1053,7 +1168,12 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         }
                     }
                 }
-                for f in [20.0f32, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0] {
+                let zoomed = (zhi / zlo) < 300.0;
+                for f in [20.0f32, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 800.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 8000.0, 10000.0, 20000.0] {
+                    let major = matches!(f as i32, 20 | 50 | 100 | 200 | 500 | 1000 | 2000 | 5000 | 10000 | 20000);
+                    if !major && !zoomed {
+                        continue;
+                    }
                     let lab = if f >= 1000.0 { format!("{}k", (f / 1000.0) as i32) } else { format!("{}", f as i32) };
                     clip.text(Pos2::new(d.fx(f), gr.bottom() - 9.0), Align2::CENTER_CENTER, lab, mono(9.5), MID);
                 }
@@ -1161,24 +1281,127 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     let u = (pp.x - gr.left()) / gr.width();
                     !(0.06..=0.94).contains(&u) && near_curve(pp)
                 };
-                // spectrum grab target
+                // the band whose own curve or coloured area is under the mouse (click selects it, the
+                // wheel changes its Q), not where the overall curve is (dragging that makes a band)
+                let area_band: Option<usize> = pointer.filter(|pp| gr.contains(*pp) && !in_overlay(*pp) && pp.y > gr.top() + 34.0 && !near_curve(*pp)).and_then(|pp| {
+                    let k = (((pp.x - gr.left()) / gr.width()) * NPTS as f32).round().clamp(0.0, NPTS as f32) as usize;
+                    let mut best: Option<(usize, f32)> = None;
+                    for i in 0..NB {
+                        if !views[i].used || !views[i].on || st.cache[i].0.is_none() {
+                            continue;
+                        }
+                        let v = clampc(st.cache[i].1[k]);
+                        if v.abs() < 1.0 {
+                            continue;
+                        }
+                        let y = d.dy(v);
+                        let on_line = (pp.y - y).abs() < 6.0;
+                        let inside = (pp.y - zero) * (y - zero) > 0.0 && (pp.y - zero).abs() < (y - zero).abs();
+                        if on_line || inside {
+                            let score = if on_line { 1000.0 } else { v.abs() };
+                            if best.is_none_or(|b| score > b.1) {
+                                best = Some((i, score));
+                            }
+                        }
+                    }
+                    best.map(|b| b.0)
+                });
+                // spectrum grab (Pro-Q style): rest the mouse in the spectrum for a second (or click and
+                // hold for a permanent grab): the spectrum freezes, the bands dim, the main peaks get
+                // labels and a peak can be dragged to make a bell there
+                let now_t = ui.input(|i| i.time);
+                let any_down = ui.input(|i| i.pointer.any_down());
+                let spts = post_pts.as_ref().or(pre_pts.as_ref());
+                let line_y = |x: f32| -> Option<f32> {
+                    let v = spts?;
+                    let f = d.xf(x);
+                    let k = v.partition_point(|q| q.0 < f).clamp(1, v.len() - 1);
+                    let (a, b) = (v[k - 1], v[k]);
+                    let t = if b.0 > a.0 { ((f / a.0).ln() / (b.0 / a.0).ln()).clamp(0.0, 1.0) } else { 0.0 };
+                    Some(d.sy(a.1 + (b.1 - a.1) * t))
+                };
+                let scale_strip = Rect::from_min_max(Pos2::new(gr.left(), gr.bottom() - 16.0), gr.max);
+                let near_node_at = |pp: Pos2| (0..NB).any(|i| views[i].used && node_pos(i).distance(pp) < 16.0);
+                let in_spectrum = |pp: Pos2| gr.contains(pp) && !in_overlay(pp) && !scale_strip.contains(pp) && pp.y > gr.top() + 34.0 && line_y(pp.x).is_some_and(|ly| pp.y > ly + 3.0) && !near_node_at(pp) && !near_curve(pp);
+                let mut peaks: Vec<(f32, f32)> = Vec::new();
                 let mut grab: Option<(f32, Pos2)> = None;
-                if p.an_grab.value() && !st.sketch_on && st.drag.is_none() {
-                    if let (Some(pp), Some(spts)) = (pointer, post_pts.as_ref().or(pre_pts.as_ref())) {
-                        let near_node = (0..NB).any(|i| views[i].used && node_pos(i).distance(pp) < 16.0);
-                        if gr.contains(pp) && !in_overlay(pp) && !near_node && !near_curve(pp) {
-                            for k in 2..spts.len() - 2 {
-                                let v = spts[k].1;
-                                if v > spts[k - 1].1 && v >= spts[k + 1].1 && v > spts[k - 2].1 + 2.0 && v > spts[k + 2].1 + 2.0 {
-                                    let q = Pos2::new(d.fx(spts[k].0), d.sy(v));
-                                    if (q.x - pp.x).abs() < 10.0 && (q.y - pp.y).abs() < 18.0 {
-                                        grab = Some((spts[k].0, q));
-                                        break;
-                                    }
+                if p.an_grab.value() && !st.sketch_on && st.edit.is_none() && spts.is_some() {
+                    // enter: resting in the spectrum (no button down)
+                    if st.grab == 0 {
+                        match pointer {
+                            Some(pp) if !any_down && in_spectrum(pp) => {
+                                if st.grab_t < 0.0 {
+                                    st.grab_t = now_t;
+                                } else if now_t - st.grab_t > 1.0 {
+                                    st.grab = 1;
+                                    st.grab_pts = spts.cloned();
+                                }
+                            }
+                            _ => st.grab_t = -1.0,
+                        }
+                        // click and hold (still) in the spectrum: permanent
+                        if bg.is_pointer_button_down_on() && st.drag.is_none() {
+                            let (t0, o0) = ui.input(|i| (i.pointer.press_start_time(), i.pointer.press_origin()));
+                            if let (Some(t0), Some(o0), Some(pp)) = (t0, o0, pointer) {
+                                if pp.distance(o0) < 4.0 && in_spectrum(o0) && now_t - t0 > 0.55 {
+                                    st.grab = 2;
+                                    st.grab_pts = spts.cloned();
+                                    st.eat_click = true;
                                 }
                             }
                         }
                     }
+                    if st.grab > 0 {
+                        // the main peaks of the frozen spectrum
+                        let v = spts.unwrap();
+                        let mut cand: Vec<(f32, f32)> = Vec::new();
+                        for k in 4..v.len().saturating_sub(4) {
+                            let y = v[k].1;
+                            let lo = (k.saturating_sub(12)..(k + 13).min(v.len())).map(|j| v[j].1).fold(f32::MAX, f32::min);
+                            if (k - 4..=k + 4).all(|j| v[j].1 <= y) && y - lo > 6.0 && y > -d.an_range + 12.0 {
+                                cand.push(v[k]);
+                            }
+                        }
+                        cand.sort_by(|a, b| b.1.total_cmp(&a.1));
+                        for c in cand {
+                            let x = d.fx(c.0);
+                            if x > gr.left() + 10.0 && x < gr.right() - 10.0 && peaks.iter().all(|q| (d.fx(q.0) - x).abs() > 44.0) && peaks.len() < 8 {
+                                peaks.push(c);
+                            }
+                        }
+                        // the target: a labelled peak, or the spectrum line itself
+                        if st.drag.is_none() {
+                            if let Some(pp) = pointer.filter(|pp| gr.contains(*pp) && !in_overlay(*pp)) {
+                                for q in &peaks {
+                                    let qp = Pos2::new(d.fx(q.0), d.sy(q.1));
+                                    if (qp.x - pp.x).abs() < 14.0 && (-28.0..40.0).contains(&(pp.y - qp.y)) {
+                                        grab = Some((q.0, qp));
+                                        break;
+                                    }
+                                }
+                                if grab.is_none() {
+                                    if let Some(ly) = line_y(pp.x) {
+                                        if (pp.y - ly).abs() < 8.0 {
+                                            grab = Some((d.xf(pp.x), Pos2::new(pp.x, ly)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // leave the temporary mode: mouse above the spectrum or out of the display
+                        if st.grab == 1 && st.drag.is_none() && !any_down && grab.is_none() {
+                            let out = pointer.is_none_or(|pp| !gr.contains(pp) || in_overlay(pp) || line_y(pp.x).is_some_and(|ly| pp.y < ly - 24.0));
+                            if out {
+                                st.grab = 0;
+                                st.grab_pts = None;
+                                st.grab_t = -1.0;
+                            }
+                        }
+                    }
+                } else {
+                    st.grab = 0;
+                    st.grab_pts = None;
+                    st.grab_t = -1.0;
                 }
                 let mut new_hover = None;
                 let mut node_resps: Vec<(usize, egui::Response)> = Vec::new();
@@ -1201,7 +1424,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         range_handle = Some((i, r));
                     }
                 }
-                st.hover = new_hover;
+                st.hover = new_hover.or(if st.drag.is_none() && st.grab == 0 && st.rubber.is_none() { area_band } else { None });
                 let snap = |f: f32| if piano { snap_note(f) } else { f };
                 let mut used_sorted: Vec<usize> = (0..NB).filter(|&k| views[k].used).collect();
                 used_sorted.sort_by(|&a, &c| views[a].spec.freq.total_cmp(&views[c].spec.freq));
@@ -1319,7 +1542,12 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     for k in targets {
                         let b = &p.bands[k];
                         let shp = b.shape.value();
-                        if mods.alt && shp.has_gain() {
+                        if mods.alt && mods.command && shp.has_gain() {
+                            // linked: gain goes one way, the dynamic range the other
+                            let dv = wheel / 30.0 * fine;
+                            set_f(setter, &b.gain, (b.gain.value() + dv).clamp(-30.0, 30.0));
+                            set_f(setter, &b.dyn_range, (b.dyn_range.value() - dv).clamp(-30.0, 30.0));
+                        } else if mods.alt && shp.has_gain() {
                             set_f(setter, &b.dyn_range, (b.dyn_range.value() + wheel / 30.0 * fine).clamp(-30.0, 30.0));
                         } else if mods.command && shp.has_gain() {
                             set_f(setter, &b.gain, (b.gain.value() + wheel / 30.0 * fine).clamp(-30.0, 30.0));
@@ -1355,6 +1583,10 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
 
                 // background
                 let bg_pos = bg.interact_pointer_pos().filter(|pp| !in_overlay(*pp));
+                // a press on the frequency scale zooms / pans (handled below), it makes no band
+                let on_scale = (bg.is_pointer_button_down_on() && ui.input(|i| i.pointer.press_origin()).is_some_and(|o| scale_strip.contains(o)))
+                    || ((bg.clicked() || bg.double_clicked()) && bg.interact_pointer_pos().is_some_and(|o| scale_strip.contains(o)))
+                    || st.scale_drag.is_some();
                 let dyn_mod = mods.alt;
                 let spec_mod = mods.alt && mods.shift;
                 let mut created: Option<usize> = None;
@@ -1399,17 +1631,31 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                             }
                         }
                     }
-                } else if let Some(pp) = bg_pos {
+                } else if let Some(pp) = bg_pos.filter(|_| !on_scale) {
                     // click: nothing selected -> new band here; with a selection -> deselect.
                     // double-click / Ctrl-click always make a band.
                     let make = |setter: &ParamSetter, pos: Pos2, end: bool| {
                         let (shape, g) = candidate(gr, pos, d.yd(pos.y), end);
                         new_band(setter, p, shape, snap(d.xf(pos.x)), g, dyn_mod, spec_mod)
                     };
-                    if bg.double_clicked() || (bg.clicked() && mods.command) {
+                    if st.eat_click {
+                        // this press switched the spectrum grab on: no band, no deselect
+                    } else if st.grab == 2 && bg.clicked() && grab.is_none() {
+                        st.grab = 0;
+                        st.grab_pts = None;
+                    } else if bg.double_clicked() || (bg.clicked() && mods.command) {
                         if !(bg.double_clicked() && created.is_some()) {
                             created = make(setter, pp, false);
                         }
+                    } else if bg.clicked() && area_band.is_some() && !mods.alt {
+                        let k = area_band.unwrap();
+                        if mods.command {
+                            st.sel[k] = !st.sel[k];
+                        } else {
+                            st.sel = [false; NB];
+                            st.sel[k] = true;
+                        }
+                        st.focus = Some(k);
                     } else if bg.clicked() {
                         if any_sel {
                             st.sel = [false; NB];
@@ -1419,11 +1665,25 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                             created = make(setter, pp, false);
                         }
                     }
-                    if bg.drag_started() {
+                    if bg.drag_started() && !st.eat_click {
                         // where the button went down, not where the drag was recognised
                         let start = ui.input(|i| i.pointer.press_origin()).unwrap_or(pp);
                         if let Some((gf, _)) = grab {
                             created = new_band(setter, p, Shape::Bell, snap(gf), 0.0, dyn_mod, spec_mod);
+                            // Q from the peak's width: where the spectrum is 6 dB below the peak
+                            if let (Some(i), Some(v)) = (created, spts) {
+                                let k = v.partition_point(|q| q.0 < gf).min(v.len() - 1);
+                                let top = v[k].1;
+                                let (mut a, mut b) = (k, k);
+                                while a > 0 && v[a].1 > top - 6.0 {
+                                    a -= 1;
+                                }
+                                while b + 1 < v.len() && v[b].1 > top - 6.0 {
+                                    b += 1;
+                                }
+                                let bw = (v[b].0 - v[a].0).max(1.0);
+                                set_f(setter, &p.bands[i].q, (gf / bw).clamp(0.5, 12.0));
+                            }
                         } else if near_curve(start) {
                             // dragging the curve makes a band (a shelf at its ends)
                             let (shape, _) = candidate(gr, start, 0.0, curve_end(start));
@@ -1465,6 +1725,15 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         }
                     }
                 }
+                if bg.drag_stopped() && st.grab == 1 {
+                    // a temporary grab ends with the drag
+                    st.grab = 0;
+                    st.grab_pts = None;
+                    st.grab_t = -1.0;
+                }
+                if !any_down {
+                    st.eat_click = false;
+                }
                 if bg.drag_stopped() {
                     if let Some(dr) = st.drag.take() {
                         for (k, _, _, _) in &dr.bands {
@@ -1476,8 +1745,8 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     }
                 }
                 // preview of the band a click / drag would make
-                if !st.sketch_on && st.drag.is_none() && st.rubber.is_none() && st.hover.is_none() && st.edit.is_none() {
-                    if let Some(pp) = pointer.filter(|pp| gr.contains(*pp) && !in_overlay(*pp) && !st.pbox.is_some_and(|(i, _)| pbox_rect(i).contains(*pp))) {
+                if !st.sketch_on && st.drag.is_none() && st.rubber.is_none() && st.hover.is_none() && st.edit.is_none() && (st.grab == 0 || grab.is_some()) {
+                    if let Some(pp) = pointer.filter(|pp| gr.contains(*pp) && !scale_strip.contains(*pp) && !in_overlay(*pp) && !st.pbox.is_some_and(|(i, _)| pbox_rect(i).contains(*pp))) {
                         let end = curve_end(pp);
                         let (shape, g) = if grab.is_some() { (Shape::Bell, 0.0) } else { candidate(gr, pp, if near_curve(pp) { 0.0 } else { d.yd(pp.y) }, end) };
                         let f = grab.map(|g| g.0).unwrap_or_else(|| d.xf(pp.x));
@@ -1494,6 +1763,22 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     }
                 }
                 let typing = ui.ctx().wants_keyboard_input();
+                if !typing {
+                    // Ctrl / Cmd / Alt + Z: undo; with Shift (or Ctrl + Y): redo
+                    // the modifiers of the key event itself (a quick Alt+Z can release Alt in the same frame)
+                    let keys: Vec<(Key, egui::Modifiers)> = ui.input(|i| i.events.iter().filter_map(|e| if let egui::Event::Key { key, pressed: true, modifiers, .. } = e { Some((*key, *modifiers)) } else { None }).collect());
+                    for (k, m) in keys {
+                        if k == Key::Z && (m.command || m.alt) {
+                            if m.shift {
+                                do_redo(st, setter, p);
+                            } else {
+                                do_undo(st, setter, p);
+                            }
+                        } else if k == Key::Y && m.command {
+                            do_redo(st, setter, p);
+                        }
+                    }
+                }
                 if !typing && st.edit.is_none() && ui.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
                     for i in 0..NB {
                         if st.sel[i] {
@@ -1530,19 +1815,13 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                         ui.close_menu();
                     }
                 });
-                if !views.iter().any(|v| v.used) && !st.sketch_on {
+                if !views.iter().any(|v| v.used) && !st.sketch_on && st.grab == 0 {
                     clip.text(gr.center() - Vec2::new(0.0, 60.0), Align2::CENTER_CENTER, "click to add a band   ·   drag the line to shape it   ·   Alt: dynamic, Alt + Shift: spectral", mono(11.0), DIM);
-                    clip.text(gr.center() - Vec2::new(0.0, 42.0), Align2::CENTER_CENTER, "far left / right: cuts   ·   line ends: shelves   ·   bottom edge: notch   ·   drag a spectrum peak to grab it", mono(10.0), DIM);
+                    clip.text(gr.center() - Vec2::new(0.0, 42.0), Align2::CENTER_CENTER, "far left / right: cuts   ·   line ends: shelves   ·   bottom edge: notch   ·   rest on the spectrum to grab peaks", mono(10.0), DIM);
                 }
                 if st.sketch_on {
                     clip.text(Pos2::new(gr.center().x, gr.top() + 16.0), Align2::CENTER_CENTER, "EQ SKETCH: draw the curve you want, bands are added to follow it", mono(10.5), Color32::from_rgb(120, 200, 255));
                 }
-                if let Some((gf, q)) = grab {
-                    painter.circle_stroke(q, 7.0, Stroke::new(1.5_f32, WHITE));
-                    let lab = if piano { note_name(gf) } else { format!("{} Hz", fmt_hz(gf)) };
-                    painter.text(q - Vec2::new(0.0, 14.0), Align2::CENTER_BOTTOM, lab, mono(10.0), WHITE);
-                }
-
                 // ---------------- dots
                 for i in 0..NB {
                     let bv = &views[i];
@@ -1591,6 +1870,88 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                     painter.rect_stroke(rr, CornerRadius::same(2), Stroke::new(1.0_f32, Color32::BLACK), StrokeKind::Inside);
                 }
 
+                // ---------------- spectrum grab overlay: bands dimmed, frozen spectrum and its peaks on top
+                if st.grab > 0 {
+                    painter.rect_filled(gr, CornerRadius::ZERO, Color32::from_black_alpha(120));
+                    let gcol = if st.grab == 2 { Color32::from_rgb(110, 180, 255) } else { WHITE };
+                    if let Some(v) = spts {
+                        let pts: Vec<Pos2> = v.iter().map(|&(f, db)| Pos2::new(d.fx(f), d.sy(db))).collect();
+                        let gclip = painter.with_clip_rect(gr.shrink(1.0));
+                        grad_fill(&gclip, &smooth_line(&pts, 2), gr.bottom(), gcol, 46, 4);
+                        gclip.add(egui::Shape::line(smooth_line(&pts, 2), PathStroke::new(1.8_f32, gcol)));
+                        for q in &peaks {
+                            let qp = Pos2::new(d.fx(q.0), d.sy(q.1));
+                            gclip.circle_filled(qp, 2.5, gcol);
+                            let lab = if piano { note_name(q.0) } else { fmt_hz(q.0) };
+                            gclip.text(qp - Vec2::new(0.0, 8.0), Align2::CENTER_BOTTOM, lab, mono(9.5), gcol);
+                        }
+                        if let Some((_, q)) = grab {
+                            gclip.circle_stroke(q, 7.0, Stroke::new(1.5_f32, gcol));
+                        }
+                        // the band being dragged out of a peak stays visible
+                        if let Some(dr) = st.drag.as_ref() {
+                            if dr.kind == DragKind::Create {
+                                if let Some(&(k, _, _, _)) = dr.bands.first() {
+                                    let col = band_col(k);
+                                    let pts: Vec<Pos2> = xs.iter().zip(st.cache[k].1.iter()).map(|(&x, &v)| Pos2::new(x, d.dy(clampc(v)))).collect();
+                                    gclip.add(egui::Shape::line(pts, PathStroke::new(2.0_f32, col)));
+                                    painter.circle_filled(node_pos(k), 6.0, col);
+                                }
+                            }
+                        }
+                    }
+                    let hint = if st.grab == 2 { "SPECTRUM GRAB (held): drag peaks to cut or boost them  ·  click the background to leave" } else { "SPECTRUM GRAB: drag a peak to cut or boost it  ·  move above the spectrum to leave" };
+                    painter.text(Pos2::new(gr.center().x, gr.top() + 48.0), Align2::CENTER_CENTER, hint, mono(10.0), gcol);
+                }
+
+                // ---------------- frequency scale: hover readout, drag to zoom / pan, double-click to reset
+                if pointer.is_some_and(|pp| scale_strip.contains(pp) && !in_overlay(pp)) || st.scale_drag.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+                if bg.drag_started() && on_scale {
+                    let o0 = ui.input(|i| i.pointer.press_origin()).unwrap_or(scale_strip.center());
+                    st.scale_drag = Some((o0, st.zoom.0, st.zoom.1));
+                }
+                if let (Some((o0, lo0, hi0)), true) = (st.scale_drag, bg.dragged()) {
+                    if let Some(pp) = pointer {
+                        let (llo, lhi) = (lo0.ln(), hi0.ln());
+                        let u = ((o0.x - gr.left()) / gr.width()).clamp(0.0, 1.0);
+                        let anchor = llo + u * (lhi - llo);
+                        let full = (F_HI / F_LO).ln();
+                        // up: zoom in at the clicked frequency, sideways: pan
+                        let span = ((lhi - llo) * (0.012 * (pp.y - o0.y)).exp()).clamp(2f32.ln(), full);
+                        let shift = -(pp.x - o0.x) / gr.width() * span;
+                        let mut lo = anchor - u * span + shift;
+                        lo = lo.clamp(F_LO.ln(), F_HI.ln() - span);
+                        st.zoom = (lo.exp(), (lo + span).exp());
+                    }
+                }
+                if bg.drag_stopped() || !any_down {
+                    st.scale_drag = None;
+                }
+                if bg.double_clicked() && on_scale {
+                    st.zoom = (F_LO, F_HI);
+                }
+                if st.zoom != (F_LO, F_HI) {
+                    painter.text(Pos2::new(gr.left() + 40.0, gr.bottom() - 26.0), Align2::LEFT_CENTER, format!("ZOOM {}–{} Hz  ·  double-click the scale to reset", fmt_hz(st.zoom.0), fmt_hz(st.zoom.1)), mono(9.0), DIM);
+                }
+                if let Some(pp) = pointer.filter(|pp| gr.contains(*pp) && pp.y > gr.top() + 34.0 && !in_overlay(*pp) && !st.pbox.is_some_and(|(i, _)| pbox_rect(i).contains(*pp))) {
+                    let f = d.xf(pp.x);
+                    if piano {
+                        let m = midi_of(f).round();
+                        let f0 = 440.0 * 2f32.powf((m - 0.5 - 69.0) / 12.0);
+                        let f1 = 440.0 * 2f32.powf((m + 0.5 - 69.0) / 12.0);
+                        let r = Rect::from_min_max(Pos2::new(d.fx(f0) + 0.3, ky), Pos2::new(d.fx(f1) - 0.3, ky + 12.0));
+                        painter.rect_filled(r, CornerRadius::same(1), Color32::from_rgb(110, 180, 255));
+                    }
+                    let lab = if piano { format!("{} · {}", fmt_hz(f), note_name(f)) } else { format!("{} Hz", fmt_hz(f)) };
+                    let w = ui.fonts(|fo| fo.layout_no_wrap(lab.clone(), mono(9.5), WHITE).size().x) + 12.0;
+                    let x = pp.x.clamp(gr.left() + w * 0.5 + 2.0, gr.right() - w * 0.5 - 2.0);
+                    let r = Rect::from_center_size(Pos2::new(x, gr.bottom() - 9.0), Vec2::new(w, 15.0));
+                    painter.rect_filled(r, CornerRadius::same(4), C_BTN_H);
+                    painter.text(r.center(), Align2::CENTER_CENTER, lab, mono(9.5), C_TXT);
+                }
+
                 // ---------------- top bar: brand | undo redo · A/B · copy | bypass · range
                 let tb = Rect::from_min_size(gr.min, Vec2::new(gr.width(), 34.0));
                 painter.rect_filled(tb, CornerRadius::ZERO, C_BG);
@@ -1600,20 +1961,11 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 painter.text(Pos2::new(tb.left() + 18.0 + nw, tb.center().y), Align2::LEFT_CENTER, "EQ", mono(14.0), C_DYN);
                 let cx = tb.center().x;
                 let tr = |x: f32, w: f32| Rect::from_min_size(Pos2::new(cx + x, tb.top() + 5.0), Vec2::new(w, 24.0));
-                if ibtn(ui, tr(-132.0, 28.0), false, "Undo", |pt, c, col| icon_arrow(pt, c, -1.0, col)).clicked() && st.undo.len() > 1 {
-                    let cur = st.undo.pop().unwrap();
-                    st.redo.push(cur);
-                    if let Some(prev) = st.undo.last() {
-                        restore(setter, p, prev);
-                    }
-                    st.pending_snap = false;
+                if ibtn(ui, tr(-132.0, 28.0), false, "Undo (Ctrl+Z / Alt+Z)", |pt, c, col| icon_arrow(pt, c, -1.0, col)).clicked() {
+                    do_undo(st, setter, p);
                 }
-                if ibtn(ui, tr(-100.0, 28.0), false, "Redo", |pt, c, col| icon_arrow(pt, c, 1.0, col)).clicked() {
-                    if let Some(sn) = st.redo.pop() {
-                        restore(setter, p, &sn);
-                        st.undo.push(sn);
-                    }
-                    st.pending_snap = false;
+                if ibtn(ui, tr(-100.0, 28.0), false, "Redo (Ctrl+Shift+Z / Ctrl+Y)", |pt, c, col| icon_arrow(pt, c, 1.0, col)).clicked() {
+                    do_redo(st, setter, p);
                 }
                 // A / B as one segmented control
                 let seg = tr(-56.0, 56.0);
@@ -2212,11 +2564,20 @@ fn analyzer_panel(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, st: &mut Gui,
         }
     }
     let fz = p.an_freeze.value();
-    if tbtn(ui, at(172.0, 22.0, 66.0, 22.0), "FREEZE", fz, "Hold the spectrum (peak hold).").clicked() {
-        set_b(setter, &p.an_freeze, !fz);
+    let fr = tbtn(ui, at(172.0, 22.0, 66.0, 22.0), "FREEZE", fz || st.freeze_hold, "Freeze: the spectrum stops falling and keeps its maximum. Click to switch, hold to freeze only while held.");
+    let now = ui.input(|i| i.time);
+    if fr.is_pointer_button_down_on() {
+        let t0 = *st.freeze_t.get_or_insert(now);
+        st.freeze_hold = now - t0 > 0.3;
+    } else {
+        if fr.clicked() && !st.freeze_hold {
+            set_b(setter, &p.an_freeze, !fz);
+        }
+        st.freeze_t = None;
+        st.freeze_hold = false;
     }
     let gb = p.an_grab.value();
-    if tbtn(ui, at(242.0, 22.0, 66.0, 22.0), "GRAB", gb, "Spectrum grab: drag a spectrum peak to make a band there.").clicked() {
+    if tbtn(ui, at(242.0, 22.0, 66.0, 22.0), "GRAB", gb, "Spectrum grab: rest the mouse in the spectrum for a second (or click and hold for a permanent grab), then drag a peak to make a band there.").clicked() {
         set_b(setter, &p.an_grab, !gb);
     }
     let cl = p.an_coll.value();
@@ -2410,10 +2771,14 @@ fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
     if p.an_sc.value() {
         v.push("SC");
     }
-    let alab = format!("{}{}", if v.is_empty() { "Off".to_string() } else { v.join(" + ") }, if p.an_freeze.value() { " · frozen" } else { "" });
+    let alab = format!("{}{}", if v.is_empty() { "Off".to_string() } else { v.join(" + ") }, if p.an_freeze.value() || st.freeze_hold { " · frozen" } else { "" });
     let (ar, _) = bar_item(ui, painter, ana_btn.left(), y, "ANALYZER", &alab, true, "Analyzer (hover for settings, click to keep them open)");
     if ar.clicked() {
         st.pop = if st.pop == Pop::Analyzer { Pop::None } else { Pop::Analyzer };
+    }
+    if p.an_freeze.value() || st.freeze_hold || st.grab > 0 {
+        // frozen: a blue line on top of the analyzer button
+        painter.hline(ar.rect.left() + 6.0..=ar.rect.right() - 6.0, ar.rect.top() + 1.0, Stroke::new(2.0_f32, Color32::from_rgb(110, 180, 255)));
     }
     // output (right aligned)
     let drag_num = |ui: &mut Ui, x: f32, cap: &str, prm: &FloatParam, txt: String, tip: &str, step: f32| -> f32 {

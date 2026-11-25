@@ -6,7 +6,7 @@ use winapi::um::ole2::{OleInitialize, RegisterDragDrop, RevokeDragDrop};
 use winapi::um::oleidl::LPDROPTARGET;
 use winapi::um::winuser::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetDpiForWindow, GetFocus, GetMessageW, GetWindowLongPtrW, LoadCursorW, PostMessageW,
+    GetDpiForWindow, GetFocus, GetMessageW, GetParent, GetWindowLongPtrW, LoadCursorW, PostMessageW,
     RegisterClassW, ReleaseCapture, SetCapture, SetCursor, SetFocus, SetProcessDpiAwarenessContext,
     SetTimer, SetWindowLongPtrW, SetWindowPos, TrackMouseEvent, TranslateMessage, UnregisterClassW,
     CS_OWNDC, GET_XBUTTON_WPARAM, GWLP_USERDATA, HTCLIENT, IDC_ARROW, MSG, SWP_NOMOVE,
@@ -264,6 +264,11 @@ unsafe fn wnd_proc_inner(
             if let Some(button) = button {
                 let event = match msg {
                     WM_LBUTTONDOWN | WM_MBUTTONDOWN | WM_RBUTTONDOWN | WM_XBUTTONDOWN => {
+                        // a click gives the plug-in the keyboard (its shortcuts work, keys it does
+                        // not use are passed on to the host window, see the keyboard messages)
+                        if GetFocus() != hwnd {
+                            SetFocus(hwnd);
+                        }
                         // Capture the mouse cursor on button down
                         mouse_button_counter = mouse_button_counter.saturating_add(1);
                         SetCapture(hwnd);
@@ -340,13 +345,61 @@ unsafe fn wnd_proc_inner(
             let opt_event =
                 window_state.keyboard_state.borrow_mut().process_message(hwnd, msg, wparam, lparam);
 
-            if let Some(event) = opt_event {
+            thread_local! {
+                // whether the plug-in took the last key (the WM_CHARs that follow belong to it)
+                static LAST_USED: Cell<bool> = const { Cell::new(false) };
+                // a key down whose event comes with the WM_CHAR after it: held back until we
+                // know whether the plug-in takes the key
+                static PENDING: Cell<Option<(UINT, WPARAM, LPARAM)>> = const { Cell::new(None) };
+            }
+            let forward = |m: UINT, w: WPARAM, l: LPARAM| {
+                let parent = GetParent(hwnd);
+                if !parent.is_null() {
+                    PostMessageW(parent, m, w, l);
+                }
+            };
+            let used = opt_event.map(|event| {
                 window_state
                     .handler
                     .borrow_mut()
                     .as_mut()
                     .unwrap()
-                    .on_event(&mut window, Event::Keyboard(event));
+                    .on_event(&mut window, Event::Keyboard(event))
+                    == crate::EventStatus::Captured
+            });
+            // keys the plug-in does not use (space = play, ...) go on to the host
+            match msg {
+                WM_KEYDOWN | WM_SYSKEYDOWN => match used {
+                    None => PENDING.with(|p| p.set(Some((msg, wparam, lparam)))),
+                    Some(u) => {
+                        LAST_USED.with(|c| c.set(u));
+                        if !u {
+                            forward(msg, wparam, lparam);
+                        }
+                    }
+                },
+                WM_CHAR | WM_SYSCHAR => {
+                    let pending = PENDING.with(|p| p.take());
+                    let u = match used {
+                        Some(u) => {
+                            LAST_USED.with(|c| c.set(u));
+                            u
+                        }
+                        None => LAST_USED.with(|c| c.get()) && pending.is_none(),
+                    };
+                    if !u {
+                        if let Some((m, w, l)) = pending {
+                            forward(m, w, l);
+                        }
+                        forward(msg, wparam, lparam);
+                    }
+                }
+                WM_KEYUP | WM_SYSKEYUP => {
+                    if !used.unwrap_or(false) {
+                        forward(msg, wparam, lparam);
+                    }
+                }
+                _ => {}
             }
 
             if msg != WM_SYSKEYDOWN {

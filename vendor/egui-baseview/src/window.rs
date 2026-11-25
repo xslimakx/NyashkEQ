@@ -599,7 +599,7 @@ where
                     _ => (),
                 }
 
-                if let Some(key) = crate::translate::translate_virtual_key(&event.key) {
+                if let Some(key) = crate::translate::translate_virtual_key(&event.key).or_else(|| crate::translate::translate_code(event.code)) {
                     self.egui_input.events.push(egui::Event::Key {
                         key,
                         physical_key: None,
@@ -688,6 +688,18 @@ where
             },
         }
 
+        // keys: taken while egui edits text, and for the plug-in's own shortcuts (undo / redo,
+        // delete); everything else goes back to the host (space = play, ...)
+        if let baseview::Event::Keyboard(e) = &event {
+            use keyboard_types::Code;
+            let m = self.egui_input.modifiers;
+            let shortcut = match e.code {
+                Code::KeyZ | Code::KeyY => m.ctrl || m.alt || m.command,
+                Code::Delete | Code::Backspace => true,
+                _ => false,
+            };
+            return if shortcut || self.egui_ctx.wants_keyboard_input() { EventStatus::Captured } else { EventStatus::Ignored };
+        }
         EventStatus::Captured
     }
 }

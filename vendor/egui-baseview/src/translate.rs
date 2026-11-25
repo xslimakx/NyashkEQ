@@ -29,7 +29,7 @@ pub(crate) fn translate_virtual_key(key: &keyboard_types::Key) -> Option<egui::K
         K::PageUp => Key::PageUp,
         K::PageDown => Key::PageDown,
 
-        K::Character(s) => match s.chars().next()? {
+        K::Character(s) => match s.chars().next()?.to_ascii_lowercase() {
             ' ' => Key::Space,
             '0' => Key::Num0,
             '1' => Key::Num1,
@@ -74,6 +74,42 @@ pub(crate) fn translate_virtual_key(key: &keyboard_types::Key) -> Option<egui::K
         _ => {
             return None;
         }
+    })
+}
+
+/// the key by its place on the keyboard: shortcuts still work with another layout active
+/// (Ukrainian, Russian, ...) or when the character is not a Latin letter
+pub(crate) fn translate_code(code: keyboard_types::Code) -> Option<egui::Key> {
+    use egui::Key;
+    use keyboard_types::Code as C;
+    Some(match code {
+        C::KeyA => Key::A,
+        C::KeyB => Key::B,
+        C::KeyC => Key::C,
+        C::KeyD => Key::D,
+        C::KeyE => Key::E,
+        C::KeyF => Key::F,
+        C::KeyG => Key::G,
+        C::KeyH => Key::H,
+        C::KeyI => Key::I,
+        C::KeyJ => Key::J,
+        C::KeyK => Key::K,
+        C::KeyL => Key::L,
+        C::KeyM => Key::M,
+        C::KeyN => Key::N,
+        C::KeyO => Key::O,
+        C::KeyP => Key::P,
+        C::KeyQ => Key::Q,
+        C::KeyR => Key::R,
+        C::KeyS => Key::S,
+        C::KeyT => Key::T,
+        C::KeyU => Key::U,
+        C::KeyV => Key::V,
+        C::KeyW => Key::W,
+        C::KeyX => Key::X,
+        C::KeyY => Key::Y,
+        C::KeyZ => Key::Z,
+        _ => return None,
     })
 }
 

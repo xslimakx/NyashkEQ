@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "nyashk_common"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "nih_plug",
  "nih_plug_egui",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "nyashkeq"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "nih_plug",
  "nih_plug_egui",

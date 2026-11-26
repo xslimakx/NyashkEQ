@@ -115,6 +115,11 @@ impl<'a> Window<'a> {
         self.window.set_keyboard_events(on);
     }
 
+    /// Only meaningful on X11: the mouse is over the window with Ctrl or Alt held.
+    pub fn shortcut_keys_wanted(&mut self) -> bool {
+        self.window.shortcut_keys_wanted()
+    }
+
     pub fn has_focus(&mut self) -> bool {
         self.window.has_focus()
     }

@@ -867,6 +867,10 @@ impl Window<'_> {
 
     pub fn set_keyboard_events(&mut self, _on: bool) {}
 
+    pub fn shortcut_keys_wanted(&mut self) -> bool {
+        false
+    }
+
     pub fn set_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
         self.state.cursor_icon.set(mouse_cursor);
         unsafe {

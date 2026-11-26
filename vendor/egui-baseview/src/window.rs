@@ -470,7 +470,8 @@ where
         // take keyboard events only while egui edits text, so the DAW keeps its shortcuts (space = play)
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            let want = self.egui_ctx.wants_keyboard_input();
+            // text editing, or a shortcut on its way (mouse over the window, Ctrl / Alt held)
+            let want = self.egui_ctx.wants_keyboard_input() || window.shortcut_keys_wanted();
             if want != self.kb_events {
                 self.kb_events = want;
                 window.set_keyboard_events(want);
@@ -576,6 +577,26 @@ where
                 use keyboard_types::Code;
 
                 let pressed = event.state == keyboard_types::KeyState::Down;
+
+                // the modifiers as the key event carries them (the modifier's own press may have
+                // happened while the window did not take keys, e.g. Alt held before Alt+Z)
+                {
+                    use keyboard_types::Modifiers as M;
+                    let m = event.modifiers;
+                    let mo = &mut self.egui_input.modifiers;
+                    mo.shift = m.contains(M::SHIFT);
+                    mo.ctrl = m.contains(M::CONTROL);
+                    mo.alt = m.contains(M::ALT);
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        mo.command = mo.ctrl;
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        mo.mac_cmd = m.contains(M::META);
+                        mo.command = mo.mac_cmd;
+                    }
+                }
 
                 match event.code {
                     Code::ShiftLeft | Code::ShiftRight => self.egui_input.modifiers.shift = pressed,

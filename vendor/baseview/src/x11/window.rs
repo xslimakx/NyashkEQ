@@ -415,6 +415,18 @@ impl<'a> Window<'a> {
         let _ = self.inner.xcb_connection.conn.flush();
     }
 
+    /// The mouse is over the window and Ctrl or Alt is held: the plug-in's shortcuts
+    /// (Ctrl / Alt + Z ...) should come here, not go to the host.
+    pub fn shortcut_keys_wanted(&mut self) -> bool {
+        let conn = &self.inner.xcb_connection.conn;
+        let Ok(cookie) = conn.query_pointer(self.inner.window_id) else { return false };
+        let Ok(r) = cookie.reply() else { return false };
+        let size = self.inner.window_info.physical_size();
+        let inside = r.same_screen && r.win_x >= 0 && r.win_y >= 0 && (r.win_x as u32) < size.width && (r.win_y as u32) < size.height;
+        let m = u16::from(r.mask);
+        inside && (m & (u16::from(x11rb::protocol::xproto::KeyButMask::CONTROL) | u16::from(x11rb::protocol::xproto::KeyButMask::MOD1))) != 0
+    }
+
     pub fn has_focus(&mut self) -> bool {
         unimplemented!()
     }

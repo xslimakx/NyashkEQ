@@ -29,7 +29,9 @@ const BAR_Y: f32 = 628.0;
 const METER_W: f32 = 44.0;
 const F_LO: f32 = 10.0;
 const F_HI: f32 = 30000.0;
-const NPTS: usize = 360;
+/// points of the response curves across the display: about one per pixel even on a large or
+/// HiDPI window, so narrow bands (Q 40) and deep notches keep their true shape and depth
+const NPTS: usize = 1440;
 /// grid for EQ match / sketch fitting: 1/12 octave, 20 Hz .. 20 kHz
 const FIT_N: usize = 121;
 
@@ -1238,10 +1240,8 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 if !split {
                     grad_fill(&clip, &main, zero, WHITE, 16, 0);
                 }
-                if !byp && !soloing {
-                    clip.add(egui::Shape::line(main.clone(), PathStroke::new(5.0_f32, Color32::from_white_alpha(14))));
-                }
-                clip.add(egui::Shape::line(main.clone(), PathStroke::new(2.2_f32, curve_col)));
+                // one crisp line, no glow around it (the halo made it look soft)
+                clip.add(egui::Shape::line(main.clone(), PathStroke::new(1.8_f32, curve_col)));
 
                 // ---------------- geometry of the overlays (they take the mouse first)
                 let node_pos = |i: usize| -> Pos2 {

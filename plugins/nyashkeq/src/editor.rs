@@ -283,12 +283,8 @@ impl Ana {
             let db = if b1 - b0 < 1.0 { cubic_at(&self.sm, 0.5 * (b0 + b1)) } else { (b0 as usize..=(b1 as usize).min(self.sm.len() - 1)).map(|k| self.sm[k]).fold(-200.0f32, f32::max) };
             out.push((f0, db + tilt * (f0 / 1000.0).log2()));
         }
-        if out.len() > 2 {
-            let ys: Vec<f32> = out.iter().map(|q| q.1).collect();
-            for i in 1..out.len() - 1 {
-                out[i].1 = (ys[i - 1] + 2.0 * ys[i] + ys[i + 1]) * 0.25;
-            }
-        }
+        // no extra smoothing across points: it lowered narrow peaks (a pure tone read up to ~5 dB
+        // too low); the time smoothing (SPEED) and the cubic interpolation keep the line calm
         out
     }
 }
@@ -1110,9 +1106,9 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 // analyzer
                 let tilt = p.an_tilt.value().db();
                 let to_pts = |v: &[(f32, f32)]| -> Vec<Pos2> { v.iter().map(|&(f, db)| Pos2::new(d.fx(f), d.sy(db))).collect() };
-                let post_pts = if p.an_post.value() { Some(st.post.points(&d, fs, tilt, 320)) } else { None };
-                let pre_pts = if p.an_pre.value() { Some(st.pre.points(&d, fs, tilt, 320)) } else { None };
-                let sc_pts = if p.an_sc.value() { Some(st.sc.points(&d, fs, tilt, 320)) } else { None };
+                let post_pts = if p.an_post.value() { Some(st.post.points(&d, fs, tilt, 640)) } else { None };
+                let pre_pts = if p.an_pre.value() { Some(st.pre.points(&d, fs, tilt, 640)) } else { None };
+                let sc_pts = if p.an_sc.value() { Some(st.sc.points(&d, fs, tilt, 640)) } else { None };
                 let (mut post_pts, mut pre_pts) = (post_pts, pre_pts);
                 if st.grab > 0 && st.grab_pts.is_some() && (post_pts.is_some() || pre_pts.is_some()) {
                     if post_pts.is_some() {
@@ -2822,4 +2818,35 @@ fn bottom_bar(ui: &mut Ui, setter: &ParamSetter, p: &EqParams, sh: &Shared, st: 
     x = drag_num(ui, x, "OUT", &p.out, format!("{:+.1} dB", p.out.value()), "Output gain: drag up / down, double-click: 0 dB", 0.1);
     let pan = p.pan.value();
     let _ = drag_num(ui, x, "PAN", &p.pan, if pan.abs() < 0.5 { "C".into() } else if pan < 0.0 { format!("L{:.0}", -pan) } else { format!("R{:.0}", pan) }, "Output pan: drag up / down, double-click: centre", 1.0);
+}
+
+#[cfg(test)]
+mod analyzer_tests {
+    use super::*;
+
+    /// The analyzer puts a tone at its true frequency and level, at every resolution and rate.
+    #[test]
+    fn tones_at_the_right_frequency_and_level() {
+        for fs in [44100.0f32, 48000.0, 96000.0] {
+            for n in [2048usize, 4096, 8192, 16384] {
+                for (f, amp) in [(41.0f32, 1.0f32), (61.0, 0.5), (440.0, 0.25), (5000.0, 1.0)] {
+                    let tap = nyashk_common::tap::Tap::new(16384);
+                    for i in 0..16384 {
+                        tap.push(amp * (std::f32::consts::TAU * f * i as f32 / fs).sin());
+                    }
+                    let mut a = Ana::new(n);
+                    for _ in 0..30 {
+                        a.update(&tap, n, 0.3, false);
+                    }
+                    let d = Disp { g: Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)), range: 12.0, an_range: 90.0, lo: 20.0, hi: 20000.0 };
+                    let pts = a.points(&d, fs, 0.0, 640);
+                    let (pf, pdb) = pts.iter().fold((0.0, -999.0), |b, q| if q.1 > b.1 { (q.0, q.1) } else { b });
+                    let want = 20.0 * amp.log10();
+                    let bin = fs / n as f32;
+                    assert!((pf - f).abs() <= bin * 1.2 + f * 0.01, "{fs} Hz, FFT {n}: tone {f} Hz shown at {pf:.1} Hz");
+                    assert!((pdb - want).abs() < 1.6, "{fs} Hz, FFT {n}: tone {f} Hz at {want:.1} dB shown at {pdb:.1} dB");
+                }
+            }
+        }
+    }
 }

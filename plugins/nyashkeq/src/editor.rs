@@ -247,11 +247,14 @@ struct Ana {
     frame: Vec<f32>,
     spec: Vec<f32>,
     sm: Vec<f32>,
+    /// `sm` with every peak raised to its true height (a tone between two bins reads up to 1.4 dB
+    /// low through the Hann window; a parabola through the peak bin and its neighbours finds it)
+    pk: Vec<f32>,
 }
 
 impl Ana {
     fn new(n: usize) -> Self {
-        Self { n, fft: Fft::new(n), frame: vec![0.0; n], spec: vec![-140.0; n / 2], sm: vec![-140.0; n / 2] }
+        Self { n, fft: Fft::new(n), frame: vec![0.0; n], spec: vec![-140.0; n / 2], sm: vec![-140.0; n / 2], pk: vec![-140.0; n / 2] }
     }
     fn update(&mut self, tap: &nyashk_common::tap::Tap, n: usize, fall: f32, freeze: bool) {
         if n != self.n {
@@ -264,6 +267,18 @@ impl Ana {
                 *s += (*v - *s) * 0.7;
             } else if !freeze {
                 *s += (*v - *s) * fall;
+            }
+        }
+        self.pk.copy_from_slice(&self.sm);
+        for k in 1..self.sm.len() - 1 {
+            let (a, b, c) = (self.sm[k - 1], self.sm[k], self.sm[k + 1]);
+            if b > a && b >= c {
+                // Hann: the louder neighbour's ratio gives the tone's offset from the bin exactly,
+                // d = (2r - 1) / (r + 1), and the window's main lobe there gives the loss
+                let r = 10f32.powf((a.max(c) - b) / 20.0);
+                let d = ((2.0 * r - 1.0) / (r + 1.0)).clamp(0.0, 0.5);
+                let w = if d < 1e-4 { 1.0 } else { let x = std::f32::consts::PI * d; (x.sin() / x) / (1.0 - d * d) };
+                self.pk[k] = b + (-20.0 * w.max(0.5).log10()).clamp(0.0, 1.5);
             }
         }
     }
@@ -280,7 +295,18 @@ impl Ana {
             let f0 = f_lo * (f_hi / f_lo).powf(i as f32 / npts as f32);
             let f1 = f_lo * (f_hi / f_lo).powf((i as f32 + 1.0) / npts as f32);
             let (b0, b1) = (bin(f0), bin(f1));
-            let db = if b1 - b0 < 1.0 { cubic_at(&self.sm, 0.5 * (b0 + b1)) } else { (b0 as usize..=(b1 as usize).min(self.sm.len() - 1)).map(|k| self.sm[k]).fold(-200.0f32, f32::max) };
+            // the loudest (peak-corrected) bin inside the point; between bins a smooth curve
+            let k0 = b0.ceil() as usize;
+            let k1 = (b1.floor() as usize).min(self.pk.len() - 1);
+            let inside = (k0..=k1).map(|k| self.pk[k]).fold(-200.0f32, f32::max);
+            let db = if b1 - b0 < 1.0 {
+                // a smooth curve between the bins, never above the two it joins (no overshoot)
+                let m = 0.5 * (b0 + b1);
+                let (i0, i1) = ((m.floor() as usize).min(self.pk.len() - 1), (m.ceil() as usize).min(self.pk.len() - 1));
+                cubic_at(&self.pk, m).min(self.pk[i0].max(self.pk[i1])).max(inside)
+            } else {
+                inside
+            };
             out.push((f0, db + tilt * (f0 / 1000.0).log2()));
         }
         // no extra smoothing across points: it lowered narrow peaks (a pure tone read up to ~5 dB
@@ -341,6 +367,8 @@ struct Gui {
     /// frequency zoom (visible range) and the range the band caches were made for
     zoom: (f32, f32),
     cache_zoom: (f32, f32),
+    /// the digital rate the cache was drawn for (None = analog)
+    cache_dig: Option<f64>,
     /// frequency-scale drag: (start, lo, hi)
     scale_drag: Option<(Pos2, f32, f32)>,
     /// spectrum grab: 0 off, 1 temporary (after hovering the spectrum), 2 permanent (click and hold)
@@ -744,12 +772,26 @@ fn view(p: &EqParams, sh: &Shared, i: usize) -> BandView {
     }
 }
 
+thread_local! {
+    /// Some(sample rate) while Zero Latency runs: the curves then show the digital filters that
+    /// actually play (they differ from the analog ideal near Nyquist); Natural / Linear Phase
+    /// correct to the analog response, so it is drawn as is
+    static DIG_FS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
 fn resp(spec: &Spec, d: &Disp, out: &mut Vec<f32>) {
     out.clear();
     let a = analog(spec);
+    let dig = DIG_FS.with(|c| c.get()).filter(|&fs| fs > 8000.0 && spec.shape != Shape::AllPass);
+    let casc = dig.map(|fs| crate::filters::Cascade::from_analog(&a, fs));
     for k in 0..=NPTS {
-        let f = d.xf(d.g.left() + d.g.width() * k as f32 / NPTS as f32);
-        out.push(a.db(f as f64) as f32);
+        let f = d.xf(d.g.left() + d.g.width() * k as f32 / NPTS as f32) as f64;
+        let v = match (dig, &casc) {
+            // nothing exists above Nyquist: hold the last value there
+            (Some(fs), Some(c)) => c.db(f.min(0.4995 * fs), fs),
+            _ => a.db(f),
+        };
+        out.push(v as f32);
     }
 }
 
@@ -931,6 +973,7 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
             undo: Vec::new(),
             zoom: (F_LO, F_HI),
             cache_zoom: (F_LO, F_HI),
+            cache_dig: None,
             scale_drag: None,
             grab: 0,
             grab_t: -1.0,
@@ -1020,8 +1063,11 @@ pub fn create(params: Arc<EqParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
                 // range: the chosen one, widened automatically when the curve goes outside it
                 let set_rng = p.disp.value().db();
                 let (zlo, zhi) = st.zoom;
-                if st.cache_zoom != st.zoom {
+                let dig = if p.pmode.value() == PMode::Zero && fs > 8000.0 { Some(fs as f64) } else { None };
+                DIG_FS.with(|c| c.set(dig));
+                if st.cache_zoom != st.zoom || st.cache_dig != dig {
                     st.cache_zoom = st.zoom;
+                    st.cache_dig = dig;
                     for c in st.cache.iter_mut() {
                         c.0 = None;
                     }
@@ -2829,7 +2875,7 @@ mod analyzer_tests {
     fn tones_at_the_right_frequency_and_level() {
         for fs in [44100.0f32, 48000.0, 96000.0] {
             for n in [2048usize, 4096, 8192, 16384] {
-                for (f, amp) in [(41.0f32, 1.0f32), (61.0, 0.5), (440.0, 0.25), (5000.0, 1.0)] {
+                for (f, amp) in [(41.0f32, 1.0f32), (61.0, 0.5), (97.3, 1.0), (440.0, 0.25), (1234.5, 0.7), (5000.0, 1.0), (12000.0, 0.1)] {
                     let tap = nyashk_common::tap::Tap::new(16384);
                     for i in 0..16384 {
                         tap.push(amp * (std::f32::consts::TAU * f * i as f32 / fs).sin());
@@ -2844,7 +2890,7 @@ mod analyzer_tests {
                     let want = 20.0 * amp.log10();
                     let bin = fs / n as f32;
                     assert!((pf - f).abs() <= bin * 1.2 + f * 0.01, "{fs} Hz, FFT {n}: tone {f} Hz shown at {pf:.1} Hz");
-                    assert!((pdb - want).abs() < 1.6, "{fs} Hz, FFT {n}: tone {f} Hz at {want:.1} dB shown at {pdb:.1} dB");
+                    assert!((pdb - want).abs() < 0.5, "{fs} Hz, FFT {n}: tone {f} Hz at {want:.1} dB shown at {pdb:.1} dB");
                 }
             }
         }

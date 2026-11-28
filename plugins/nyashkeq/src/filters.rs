@@ -468,10 +468,23 @@ fn bilinear(s: &ASec, fs: f64, wp: f64) -> DSec {
 /// How a section was digitised (kept, so dynamic gain updates skip the method search).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Method {
+    /// magnitude fit; the third match point: 0 = the section's own frequency, k = FRACS[k - 1] x Nyquist
+    Fit(u8),
+    /// bilinear, prewarped at the same choice of frequency
+    Bilinear(u8),
     #[default]
-    Fit,
-    Bilinear,
     Mzt,
+}
+
+/// extra match / prewarp frequencies tried, as fractions of Nyquist
+const FRACS: [f64; 4] = [0.2, 0.45, 0.7, 0.88];
+
+fn pick_w(s: &ASec, fs: f64, k: u8) -> f64 {
+    if k == 0 {
+        s.wn()
+    } else {
+        FRACS[(k - 1) as usize] * PI * fs
+    }
 }
 
 /// Exact pole mapping z = e^(sT) (resonances above Nyquist become critically damped).
@@ -501,7 +514,7 @@ fn poles(s: &ASec, t: f64) -> [f64; 2] {
 
 /// Poles exact, numerator fitted to the analog magnitude at DC, Nyquist and the section's own
 /// frequency (Vicanek 2016).
-fn fit(s: &ASec, fs: f64) -> Option<DSec> {
+fn fit(s: &ASec, fs: f64, wm: Option<f64>) -> Option<DSec> {
     let t = 1.0 / fs;
     let nyq = PI * fs;
     let [a1, a2] = poles(s, t);
@@ -514,7 +527,7 @@ fn fit(s: &ASec, fs: f64) -> Option<DSec> {
     let aa0 = (1.0 + a1 + a2).powi(2);
     let aa1 = (1.0 - a1 + a2).powi(2);
     let aa2 = -4.0 * a2;
-    let wm = s.wn().clamp(0.05 * nyq, 0.85 * nyq);
+    let wm = wm.unwrap_or_else(|| s.wn()).clamp(0.02 * nyq, 0.92 * nyq);
     let ph1 = (wm * t * 0.5).sin().powi(2);
     let ph0 = 1.0 - ph1;
     let ph2 = 4.0 * ph0 * ph1;
@@ -578,31 +591,77 @@ fn mzt(s: &ASec, fs: f64) -> DSec {
 
 fn design(s: &ASec, fs: f64, m: Method) -> DSec {
     match m {
-        Method::Bilinear => bilinear(s, fs, s.wn()),
+        Method::Bilinear(k) => bilinear(s, fs, pick_w(s, fs, k)),
         Method::Mzt => mzt(s, fs),
-        Method::Fit => fit(s, fs).unwrap_or_else(|| bilinear(s, fs, s.wn())),
+        Method::Fit(k) => fit(s, fs, Some(pick_w(s, fs, k))).unwrap_or_else(|| bilinear(s, fs, s.wn())),
     }
 }
 
-/// worst dB error of a digital section against its analog one, up to 20 kHz (ignoring what is
-/// more than 50 dB below the section's peak)
-fn sec_err(a: &ASec, d: &DSec, fs: f64) -> f64 {
+/// every way a section is tried
+const METHODS: [Method; 8] = [Method::Fit(0), Method::Fit(1), Method::Fit(2), Method::Fit(3), Method::Fit(4), Method::Bilinear(0), Method::Bilinear(3), Method::Mzt];
+
+/// 10 log10(x) to about 0.005 dB, without a libm call (the design search runs on the audio thread)
+#[inline]
+fn fast_db(x: f64) -> f64 {
+    let x = x.max(1e-30);
+    let bits = x.to_bits();
+    let e = ((bits >> 52) & 0x7ff) as i64 - 1023;
+    let m = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000); // 1..2
+    // log2(m) on [1, 2): t = (m - 1) / (m + 1), log2 m = 2/ln2 (t + t^3/3 + t^5/5 + t^7/7)
+    let t = (m - 1.0) / (m + 1.0);
+    let t2 = t * t;
+    let l2 = 2.885_390_081_777_927 * t * (1.0 + t2 * (1.0 / 3.0 + t2 * (0.2 + t2 * (1.0 / 7.0))));
+    3.010_299_956_639_812 * (e as f64 + l2)
+}
+
+/// frequencies the cascade is checked at, and how much each one counts: the top (from 0.15 x
+/// the sample rate, about 7 kHz, to Nyquist) counts less and less, so the low and middle range (where a wrong level is easy to hear) win
+const NCHK: usize = 48;
+fn check_grid(fs: f64) -> ([f64; NCHK], [f64; NCHK]) {
     let top = (0.47 * fs).min(21000.0);
-    let mut worst: f64 = 0.0;
-    let n = 40;
-    let mut vals = [(0.0, 0.0); 40];
-    let mut peak = -300.0f64;
-    for (i, v) in vals.iter_mut().enumerate() {
-        let f = 15.0 * (top / 15.0f64).powf(i as f64 / (n - 1) as f64);
-        let ad = 10.0 * a.mag2(2.0 * PI * f).max(1e-30).log10();
-        let (re, im) = d.h(2.0 * PI * f / fs);
-        let dd = 10.0 * (re * re + im * im).max(1e-30).log10();
-        *v = (ad, dd);
-        peak = peak.max(ad);
+    let mut f = [0.0; NCHK];
+    let mut w = [0.0; NCHK];
+    for i in 0..NCHK {
+        f[i] = 15.0 * (top / 15.0f64).powf(i as f64 / (NCHK - 1) as f64);
+        let k = (f[i] / (0.15 * fs)).log2().max(0.0) / (0.45f64 / 0.15).log2();
+        w[i] = 1.0 - 0.65 * k.min(1.0);
     }
-    for (ad, dd) in vals {
-        if ad > peak - 50.0 {
-            worst = worst.max((ad - dd.max(peak - 60.0)).abs());
+    (f, w)
+}
+
+/// Level offset that lines `dig` up with `ana`: exactly at the low end when the band passes
+/// it (bells, shelves, high cuts: a band never shifts the lows), else the mean over its pass band
+/// (within 6 dB of its loudest: low cuts, band passes). A cascade is a gain away from any other,
+/// so this is applied as one gain at the end and the search judges what is left.
+fn level_offset(ana: &[f64], dig: &[f64]) -> f64 {
+    let peak = ana.iter().copied().fold(-300.0, f64::max);
+    let off = if ana[0] > peak - 30.0 {
+        ana[0] - dig[0]
+    } else {
+        let (mut s, mut n) = (0.0, 0);
+        for i in 0..ana.len() {
+            if ana[i] > peak - 6.0 {
+                s += ana[i] - dig[i];
+                n += 1;
+            }
+        }
+        s / n.max(1) as f64
+    };
+    if off.is_finite() {
+        off
+    } else {
+        0.0
+    }
+}
+
+/// weighted worst dB error of `dig` (moved by `off` dB) against `ana` (both in dB on the check
+/// grid), ignoring what is far below the loudest point
+fn grid_err(ana: &[f64], dig: &[f64], w: &[f64], off: f64) -> f64 {
+    let peak = ana.iter().copied().fold(-300.0, f64::max);
+    let mut worst: f64 = 0.0;
+    for i in 0..ana.len() {
+        if ana[i] > peak - 50.0 {
+            worst = worst.max((ana[i] - (dig[i] + off).max(peak - 60.0)).abs() * w[i]);
         }
     }
     if worst.is_finite() {
@@ -612,45 +671,96 @@ fn sec_err(a: &ASec, d: &DSec, fs: f64) -> f64 {
     }
 }
 
-/// Best digital section for an analog one: tries the magnitude fit, the matched z-transform and
-/// the prewarped bilinear transform, keeps the closest.
-pub fn matched(s: &ASec, fs: f64, allpass: bool) -> (DSec, Method) {
-    if allpass {
-        return (bilinear(s, fs, s.wn()), Method::Bilinear);
-    }
-    let mut best = (DSec::default(), Method::Fit, f64::INFINITY);
-    for m in [Method::Fit, Method::Mzt, Method::Bilinear] {
-        let d = design(s, fs, m);
-        let e = sec_err(s, &d, fs);
-        if e < best.2 {
-            best = (d, m, e);
-        }
-    }
-    (best.0, best.1)
-}
-
 /// Digital cascade.
 #[derive(Clone, Copy, Debug)]
 pub struct Cascade {
     pub n: usize,
     pub s: [DSec; MAX_SECS],
     pub m: [Method; MAX_SECS],
+    /// level correction found by the design search (kept for quick redesigns)
+    pub g: f64,
 }
 
 impl Default for Cascade {
     fn default() -> Self {
-        Self { n: 0, s: [DSec::default(); MAX_SECS], m: [Method::Fit; MAX_SECS] }
+        Self { n: 0, s: [DSec::default(); MAX_SECS], m: [Method::Mzt; MAX_SECS], g: 1.0 }
     }
 }
 
 impl Cascade {
     /// full design (each section's method searched)
+    /// Each section is tried every way (magnitude fit / bilinear at several match frequencies,
+    /// matched z) and the one that keeps the cascade so far closest to the analog cascade so far
+    /// wins, so the small errors of one section can cancel those of the others.
     pub fn from_analog(a: &Analog, fs: f64) -> Self {
         let mut c = Cascade { n: a.n, ..Default::default() };
+        if a.allpass {
+            for i in 0..a.n {
+                c.s[i] = bilinear(&a.s[i], fs, a.s[i].wn());
+                c.m[i] = Method::Bilinear(0);
+            }
+            return c;
+        }
+        let (fq, wt) = check_grid(fs);
+        let db = fast_db;
+        // e^-jw and e^-2jw on the grid, once
+        let mut tr = [(0.0f64, 0.0f64, 0.0f64, 0.0f64); NCHK];
+        for k in 0..NCHK {
+            let w = 2.0 * PI * fq[k] / fs;
+            tr[k] = (w.cos(), -w.sin(), (2.0 * w).cos(), -(2.0 * w).sin());
+        }
+        let mut ana = [0.0f64; NCHK];
+        let mut dig = [0.0f64; NCHK];
         for i in 0..a.n {
-            (c.s[i], c.m[i]) = matched(&a.s[i], fs, a.allpass);
+            let s = &a.s[i];
+            let mut ana2 = ana;
+            for k in 0..NCHK {
+                ana2[k] += db(s.mag2(2.0 * PI * fq[k]));
+            }
+            let mut best = (DSec::default(), Method::Mzt, f64::INFINITY, dig);
+            for m in METHODS {
+                let d = design(s, fs, m);
+                if !d.b.iter().chain(d.a.iter()).all(|v| v.is_finite()) {
+                    continue;
+                }
+                let mut dig2 = dig;
+                for k in 0..NCHK {
+                    let (c1, s1, c2, s2) = tr[k];
+                    let (nr, ni) = (d.b[0] + d.b[1] * c1 + d.b[2] * c2, d.b[1] * s1 + d.b[2] * s2);
+                    let (dr, di) = (1.0 + d.a[0] * c1 + d.a[1] * c2, d.a[0] * s1 + d.a[1] * s2);
+                    dig2[k] += db((nr * nr + ni * ni) / (dr * dr + di * di).max(1e-300));
+                }
+                let e = grid_err(&ana2, &dig2, &wt, level_offset(&ana2, &dig2));
+                if e < best.2 {
+                    best = (d, m, e, dig2);
+                }
+            }
+            c.s[i] = best.0;
+            c.m[i] = best.1;
+            ana = ana2;
+            dig = best.3;
+        }
+        c.g = 10f64.powf(level_offset(&ana, &dig) / 20.0);
+        c.apply_gain();
+        c
+    }
+    /// cheap first design (each section on its own, no search): used for one control step when a
+    /// band appears, until the full search gets its turn
+    pub fn fast(a: &Analog, fs: f64) -> Self {
+        let mut c = Cascade { n: a.n, ..Default::default() };
+        for i in 0..a.n {
+            c.m[i] = if a.allpass { Method::Bilinear(0) } else { Method::Fit(0) };
+            c.s[i] = design(&a.s[i], fs, c.m[i]);
         }
         c
+    }
+    /// the level correction goes into the first section's numerator
+    fn apply_gain(&mut self) {
+        if self.n > 0 && self.g.is_finite() && self.g > 0.0 {
+            for v in self.s[0].b.iter_mut() {
+                *v *= self.g;
+            }
+        }
     }
     /// quick redesign reusing the methods found for `prev` (same shape / slope, new gain): used
     /// for dynamic gain changes
@@ -658,10 +768,11 @@ impl Cascade {
         if prev.n != a.n {
             return Self::from_analog(a, fs);
         }
-        let mut c = Cascade { n: a.n, m: prev.m, ..Default::default() };
+        let mut c = Cascade { n: a.n, m: prev.m, g: if a.allpass { 1.0 } else { prev.g }, ..Default::default() };
         for i in 0..a.n {
             c.s[i] = if a.allpass { bilinear(&a.s[i], fs, a.s[i].wn()) } else { design(&a.s[i], fs, prev.m[i]) };
         }
+        c.apply_gain();
         c
     }
     pub fn h(&self, f: f64, fs: f64) -> (f64, f64) {
@@ -812,6 +923,39 @@ mod tests {
             }
         }
         assert_eq!(fails, 0);
+    }
+
+    /// a band high up must not move the low end (an earlier design search could trade a dB at
+    /// DC for a better fit near Nyquist), and the low / middle range stays within half a dB
+    #[test]
+    fn high_bands_leave_the_low_end_alone() {
+        let mut bad = 0;
+        for fs in [44100.0, 48000.0] {
+            for shape in [Shape::HighShelf, Shape::TiltShelf, Shape::Bell, Shape::HighCut, Shape::LowShelf] {
+                for sl in [Slope::S12, Slope::S24, Slope::S48] {
+                    for (f, g, q) in [(5000.0, 12.0, 0.7), (10000.0, -12.0, 4.0), (10000.0, 12.0, 0.7), (15000.0, 6.0, 1.0)] {
+                        let c = sp(shape, sl, f, g, q);
+                        let a = analog(&c);
+                        let d = Cascade::from_analog(&a, fs);
+                        for x in [20.0, 50.0, 200.0, 1000.0] {
+                            let e = (d.db(x, fs) - a.db(x)).abs();
+                            if e >= 0.25 {
+                                eprintln!("fs {fs} {shape:?} {sl:?} f {f} g {g} q {q}: {e:.2} dB off at {x} Hz");
+                                bad += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(bad, 0);
+    }
+
+    #[test]
+    fn fast_db_is_accurate() {
+        for x in [1e-12, 1e-3, 0.1, 0.5, 0.999, 1.0, 1.5, 2.0, 10.0, 3.7e5] {
+            assert!((fast_db(x) - 10.0 * x.log10()).abs() < 0.005, "{x}");
+        }
     }
 
     #[test]

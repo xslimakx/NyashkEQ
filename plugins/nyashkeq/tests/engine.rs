@@ -387,3 +387,20 @@ fn auto_threshold_catches_bursts_not_held_notes() {
     assert!(held > -0.7, "held {held}");
     assert!(burst < -4.0, "burst {burst}");
 }
+
+/// Zero Latency: what plays is exactly the digital curve the editor draws in that mode (near
+/// Nyquist it may part from the analog ideal; the display must show the real thing)
+#[test]
+fn zero_latency_plays_the_drawn_digital_curve() {
+    use nyashkeq::filters::Cascade;
+    for b in [band(Shape::HighShelf, Slope::S12, 15000.0, 9.0, 3.0), band(Shape::Bell, Slope::S24, 17000.0, 8.0, 2.0), band(Shape::BandPass, Slope::S48, 12000.0, 0.0, 0.7), band(Shape::TiltShelf, Slope::S24, 10000.0, 12.0, 0.7)] {
+        let s = settings(PMode::Zero, &[b]);
+        let drawn = Cascade::from_analog(&analog(&b.spec), FS);
+        for f in [50.0, 1000.0, 8000.0, 14000.0, 19000.0, 22000.0] {
+            let mut e = engine(&s, 2);
+            let (gl, _) = sine_gain(&mut e, f, 1.0, 0.0);
+            let want = drawn.db(f, FS);
+            assert!((gl - want).abs() < 0.1 || want < -40.0, "{:?} at {f} Hz: plays {gl:.2} dB, drawn {want:.2}", b.spec.shape);
+        }
+    }
+}

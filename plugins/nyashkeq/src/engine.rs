@@ -472,6 +472,9 @@ impl Engine {
         let xstep = 16.0 / (0.020 * fs as f32);
         self.n_lr = 0;
         self.n_ms = 0;
+        // the full design search (~0.1 ms for a steep band) runs for one band per control step,
+        // so loading a preset with many bands never lands it all in one block
+        let mut search = 1;
         for i in 0..NB {
             let bi = self.cur.bands[i];
             let (sp, range) = self.scaled(&bi);
@@ -547,11 +550,11 @@ impl Engine {
                 b.fade = 0.0;
                 b.des = eff;
                 b.place = bi.place;
-                b.casc = Cascade::from_analog(&analog(&eff), fs);
+                b.casc = Cascade::fast(&analog(&eff), fs);
                 b.st = Default::default();
                 b.old = None;
                 b.xf = 1.0;
-                b.settle = -1;
+                b.settle = 0;
                 self.kern_dirty = true;
                 self.ag_dirty = true;
             }
@@ -578,11 +581,11 @@ impl Engine {
                 // crossfade from the old filter (its states keep running) to the new one
                 b.old = Some((b.casc, b.st, b.place));
                 b.xf = 0.0;
-                b.casc = Cascade::from_analog(&analog(&eff), fs);
+                b.casc = Cascade::fast(&analog(&eff), fs);
                 b.st = Default::default();
                 b.des = eff;
                 b.place = bi.place;
-                b.settle = -1;
+                b.settle = 0;
                 self.kern_dirty = true;
                 self.ag_dirty = true;
             } else if moved {
@@ -596,8 +599,9 @@ impl Engine {
                 }
             } else if b.settle > 0 {
                 b.settle -= 1;
-            } else if b.settle == 0 {
+            } else if b.settle == 0 && search > 0 {
                 // stopped moving: search the best digital design for every section again
+                search -= 1;
                 b.settle = -1;
                 b.casc = Cascade::from_analog(&analog(&b.des), fs);
             }

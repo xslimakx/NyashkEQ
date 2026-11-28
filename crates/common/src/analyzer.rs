@@ -54,13 +54,7 @@ impl Spectrum {
             };
             out.push(Pos2::new(fx(f0), dy(db + tilt * (f0 / 1000.0).log2())));
         }
-        // a light [1 2 1] blur: no hard steps where several bins fall on one point
-        if out.len() > 2 {
-            let ys: Vec<f32> = out.iter().map(|q| q.y).collect();
-            for i in 1..out.len() - 1 {
-                out[i].y = (ys[i - 1] + 2.0 * ys[i] + ys[i + 1]) * 0.25;
-            }
-        }
+        // no blur across points: it drew narrow peaks (tones, harmonics) several dB too low
         out
     }
 }

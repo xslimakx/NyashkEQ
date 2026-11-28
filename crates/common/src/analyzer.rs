@@ -9,12 +9,15 @@ pub struct Spectrum {
     frame: Vec<f32>,
     spec: Vec<f32>,
     pub smooth: Vec<f32>,
+    /// `smooth` with each peak raised to its true height: a tone between two bins reads up to
+    /// 1.4 dB low through the Hann window, the louder neighbour's ratio tells by how much
+    pk: Vec<f32>,
 }
 
 impl Spectrum {
     /// `n` must be a power of two (4096 is a good default at 44.1 / 48 kHz).
     pub fn new(n: usize) -> Self {
-        Self { fft: Fft::new(n), frame: vec![0.0; n], spec: vec![-140.0; n / 2], smooth: vec![-140.0; n / 2] }
+        Self { fft: Fft::new(n), frame: vec![0.0; n], spec: vec![-140.0; n / 2], smooth: vec![-140.0; n / 2], pk: vec![-140.0; n / 2] }
     }
 
     pub fn len(&self) -> usize {
@@ -33,6 +36,17 @@ impl Spectrum {
             let k = if *v > *s { 0.6 } else { 0.12 };
             *s += (*v - *s) * k;
         }
+        self.pk.copy_from_slice(&self.smooth);
+        for k in 1..self.smooth.len().saturating_sub(1) {
+            let (a, b, c) = (self.smooth[k - 1], self.smooth[k], self.smooth[k + 1]);
+            if b > a && b >= c {
+                // Hann: offset d = (2r - 1) / (r + 1) from the bin, main-lobe loss there
+                let r = 10f32.powf((a.max(c) - b) / 20.0);
+                let d = ((2.0 * r - 1.0) / (r + 1.0)).clamp(0.0, 0.5);
+                let w = if d < 1e-4 { 1.0 } else { let x = std::f32::consts::PI * d; (x.sin() / x) / (1.0 - d * d) };
+                self.pk[k] = b + (-20.0 * w.max(0.5).log10()).clamp(0.0, 1.5);
+            }
+        }
     }
 
     /// Spectrum as a polyline over `f_lo..f_hi` (log spaced). Each point takes the loudest bin it covers,
@@ -46,11 +60,16 @@ impl Spectrum {
             let f0 = f_lo * (f_hi / f_lo).powf(i as f32 / npts as f32);
             let f1 = f_lo * (f_hi / f_lo).powf((i as f32 + 1.0) / npts as f32);
             let (b0, b1) = (bin(f0), bin(f1));
+            // the loudest (peak-corrected) bin inside the point
+            let k1 = (b1.floor() as usize).min(self.pk.len() - 1);
+            let inside = (b0.ceil() as usize..=k1).map(|k| self.pk[k]).fold(-200.0f32, f32::max);
             let db = if b1 - b0 < 1.0 {
-                // between bins: a smooth (cubic) curve through them, not straight segments
-                cubic_at(&self.smooth, 0.5 * (b0 + b1))
+                // between bins: a smooth (cubic) curve, never above the two bins it joins
+                let m = 0.5 * (b0 + b1);
+                let (i0, i1) = ((m.floor() as usize).min(self.pk.len() - 1), (m.ceil() as usize).min(self.pk.len() - 1));
+                cubic_at(&self.pk, m).min(self.pk[i0].max(self.pk[i1])).max(inside)
             } else {
-                (b0 as usize..=(b1 as usize).min(self.smooth.len() - 1)).map(|k| self.smooth[k]).fold(-200.0f32, f32::max)
+                inside
             };
             out.push(Pos2::new(fx(f0), dy(db + tilt * (f0 / 1000.0).log2())));
         }
@@ -160,5 +179,31 @@ impl Wave {
     /// Highest absolute sample over the whole view.
     pub fn peak(&self) -> f32 {
         self.cols.iter().map(|(a, b)| a.abs().max(b.abs())).fold(0.0, f32::max)
+    }
+}
+
+#[cfg(test)]
+mod peak_tests {
+    use super::*;
+    /// a pure tone shows at its real level, wherever it falls between the FFT bins
+    #[test]
+    fn tones_read_at_their_level() {
+        for fs in [44100.0f32, 48000.0] {
+            for (f, amp) in [(61.0f32, 1.0f32), (97.3, 0.5), (440.0, 0.25), (1234.5, 0.7), (5000.0, 1.0), (12000.0, 0.1)] {
+                let tap = Tap::new(8192);
+                for i in 0..8192 {
+                    tap.push(amp * (std::f32::consts::TAU * f * i as f32 / fs).sin());
+                }
+                let mut s = Spectrum::new(4096);
+                for _ in 0..40 {
+                    s.update(&tap);
+                }
+                let pts = s.points(fs, 20.0, 20000.0, 400, 0.0, |f| f, |db| db);
+                let (pf, pdb) = pts.iter().fold((0.0, -300.0), |m, p| if p.y > m.1 { (p.x, p.y) } else { m });
+                let want = 20.0 * amp.log10();
+                assert!((pdb - want).abs() < 0.5, "{fs} Hz: {f} Hz at {want:.1} dB shown at {pdb:.1} dB");
+                assert!((pf / f).log2().abs() < 0.1 + fs / 4096.0 / f, "{f} Hz shown at {pf:.0} Hz");
+            }
+        }
     }
 }
